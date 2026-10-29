@@ -2,6 +2,9 @@ import { RestartButton } from "../ui/RestartButton";
 import { activeTimeZone } from "../../shared/timeZone";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearFleetEnergy, fetchEnergyHistory, fetchFleetEnergy } from "../../api/client";
+import { fetchMeteredEnergy, fetchMeteredEnergyHistory, type MeteredFleetEnergy } from "../../api/powerMeters";
+import { usePowerMeterStatus } from "../../hooks/usePowerMeters";
+import { MeterStatusLine } from "./MeterStatus";
 import { ClearMenu } from "../ui/ClearMenu";
 import type { EnergyHistory, FleetEnergy, Settings, SparkSnapshot } from "../../api/types";
 import { StackedBarChart, type BarBucket, type BarSeries } from "../ui/StackedBarChart";
@@ -53,6 +56,12 @@ const RANGES: Array<{ id: EnergyRange; label: string; long: string }> = [
 ];
 
 const pct = (v: number, digits = 0) => `${(v * 100).toFixed(digits)}%`;
+
+/** Where the figures come from: external power meters (opt-in) or the GPU+CPU estimate. */
+export type EnergySource = "meter" | "estimate";
+
+const isMetered = (live: FleetEnergy | null): live is MeteredFleetEnergy =>
+  (live as MeteredFleetEnergy | null)?.source === "meter";
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -120,26 +129,46 @@ export function EnergyPage({
   const [monthlyReload, setMonthlyReload] = useState(0);
   const [sort, setSort] = useState<{ key: NodeSortKey; dir: "asc" | "desc" }>({ key: "kwh", dir: "desc" });
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
+  const meterStatus = usePowerMeterStatus();
+  const [preferredSource, setPreferredSource] = useState<EnergySource>("meter");
+  const source: EnergySource = meterStatus?.enabled ? preferredSource : "estimate";
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
 
-  const loadHistory = useCallback(
-    () =>
-      fetchEnergyHistory()
-        .then((next) => {
-          setHistory(next);
-          setHistoryError(null);
-        })
-        .catch((err) => setHistoryError(errMsg(err))),
-    []
-  );
-  const loadLive = useCallback(
-    () =>
-      fetchFleetEnergy()
-        .then(setLive)
-        .catch(() => undefined),
-    []
-  );
+  const loadHistory = useCallback(() => {
+    const asked = source;
+    return (asked === "meter" ? fetchMeteredEnergyHistory() : fetchEnergyHistory())
+      .then((next) => {
+        if (sourceRef.current !== asked) return;
+        setHistory(next);
+        setHistoryError(null);
+      })
+      .catch((err) => {
+        if (sourceRef.current === asked) setHistoryError(errMsg(err));
+      });
+  }, [source]);
+  const loadLive = useCallback(() => {
+    const asked = source;
+    return (asked === "meter" ? fetchMeteredEnergy() : fetchFleetEnergy())
+      .then((next) => {
+        if (sourceRef.current === asked) setLive(next);
+      })
+      .catch(() => undefined);
+  }, [source]);
   useVisiblePoll(loadHistory, HISTORY_POLL_MS);
   useVisiblePoll(loadLive, LIVE_POLL_MS);
+  // Switching source: drop the other source's figures and fetch at once.
+  const firstSource = useRef(source);
+  useEffect(() => {
+    if (firstSource.current === source) return;
+    firstSource.current = source;
+    setHistory(null);
+    setHistoryError(null);
+    setLive(null);
+    void loadHistory();
+    void loadLive();
+  }, [source, loadHistory, loadLive]);
+  const metered = source === "meter";
 
   const price = settings?.energyPricePerKwh ?? null;
   const currency = settings?.energyCurrency || "$";
@@ -211,7 +240,12 @@ export function EnergyPage({
       return (
         <section className="panel en-state" role="status">
           <h2>Warming up</h2>
-          <p>No complete energy interval has been recorded yet. Data appears here once every node has reported fresh power telemetry for a little while.</p>
+          {metered ? (
+            <p>No metered energy yet. Data appears once the power meters have reported for a few minutes, or once a meter's own history has been loaded.</p>
+          ) : (
+            <p>No complete energy interval has been recorded yet. Data appears here once every node has reported fresh power telemetry for a little while.</p>
+          )}
+          {metered && isMetered(live) ? <MeterStatusLine live={live} /> : null}
         </section>
       );
     }
@@ -229,6 +263,7 @@ export function EnergyPage({
         setSort={setSort}
         onSelectSpark={onSelectSpark}
         stale={Boolean(historyError)}
+        metered={metered}
       />
     );
   })();
@@ -239,11 +274,25 @@ export function EnergyPage({
         <div>
           <h1>Fleet energy</h1>
           <p className="page-head__sub">
-            Estimated electricity use of your Sparks from GPU and CPU power telemetry. Not wall-metered.
+            {metered
+              ? "Electricity use of your Sparks, measured at the wall by external power meters."
+              : "Estimated electricity use of your Sparks from GPU and CPU power telemetry. Not wall-metered."}
             {history ? <span className="mono en-updated"> Updated {new Date(history.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: activeTimeZone() })}</span> : null}
           </p>
         </div>
         <div className="page-head__tools">
+          {meterStatus?.enabled ? (
+            <div className="seg" role="group" aria-label="Energy source">
+              {([
+                ["meter", "Metered"],
+                ["estimate", "Estimated"],
+              ] as const).map(([id, label]) => (
+                <button key={id} type="button" aria-pressed={source === id} className={source === id ? "is-on" : ""} onClick={() => setPreferredSource(id)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="seg" role="group" aria-label="Time range">
             {RANGES.map((r) => (
               <button key={r.id} type="button" aria-pressed={range === r.id} className={range === r.id ? "is-on" : ""} onClick={() => setRange(r.id)}>
@@ -251,7 +300,7 @@ export function EnergyPage({
               </button>
             ))}
           </div>
-          <ClearMenu
+          {metered ? null : <ClearMenu
             label="Reset…"
             choices={ENERGY_CLEAR}
             note="Power keeps being recorded from now on, and Monthly history is kept. This can't be undone."
@@ -261,7 +310,7 @@ export function EnergyPage({
               setMonthlyReload((n) => n + 1);
               return removed;
             }}
-          />
+          />}
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => void copyCsv()} disabled={!model || model.inRange.length === 0}>
             {copied === "ok" ? "Copied" : copied === "fail" ? "Copy failed" : "Copy CSV"}
           </button>
@@ -269,7 +318,7 @@ export function EnergyPage({
         </div>
       </div>
       {body}
-      <MonthlyEnergy nameOf={nameOf} price={price} currency={currency} reloadToken={monthlyReload} />
+      <MonthlyEnergy nameOf={nameOf} price={price} currency={currency} reloadToken={monthlyReload} source={source} />
     </div>
   );
 }
@@ -300,6 +349,7 @@ function EnergyBody({
   setSort,
   onSelectSpark,
   stale,
+  metered,
 }: {
   model: Model;
   live: FleetEnergy | null;
@@ -313,6 +363,7 @@ function EnergyBody({
   setSort: (s: { key: NodeSortKey; dir: "asc" | "desc" }) => void;
   onSelectSpark?: (id: string) => void;
   stale: boolean;
+  metered: boolean;
 }) {
   const { summary, win, mode, buckets, powerBuckets, delta, insights } = model;
   const tz = browserTzOffset;
@@ -342,9 +393,16 @@ function EnergyBody({
   return (
     <>
       {stale ? <p className="en-banner en-banner--warn" role="status">Could not refresh just now; showing the last data received.</p> : null}
-      <p className="en-banner" role="note">
-        <b>Estimated, not metered.</b> Figures are integrated from GPU and CPU power readings and leave out power-supply losses and other components, so the wall draw is somewhat higher.
-      </p>
+      {metered ? (
+        <div className="en-banner" role="note">
+          <b>Metered at the wall.</b> Live readings appear first; meters that keep their own history replace them with their recorded figures as those arrive.
+          {isMetered(live) ? <MeterStatusLine live={live} /> : null}
+        </div>
+      ) : (
+        <p className="en-banner" role="note">
+          <b>Estimated, not metered.</b> Figures are integrated from GPU and CPU power readings and leave out power-supply losses and other components, so the wall draw is somewhat higher.
+        </p>
+      )}
 
       <section className="en-tiles" aria-label="Summary">
         <Tile label="Current draw">
@@ -368,7 +426,7 @@ function EnergyBody({
             )}
           </div>
         </Tile>
-        <Tile label="Estimated cost">
+        <Tile label={metered ? "Cost" : "Estimated cost"}>
           <div className="big-num mono">{summary.cost != null && !noData ? formatMoney(summary.cost, currency) : "—"}</div>
           <div className="en-tile__sub">
             {price == null ? (
@@ -543,12 +601,24 @@ function EnergyBody({
         <section className="panel en-panel" aria-labelledby="en-h-notes">
           <header className="en-panel__head"><h2 id="en-h-notes">About this data</h2></header>
           <ul className="en-list en-list--notes">
-            <li><b>Estimated.</b> Energy is power telemetry (GPU + CPU) integrated over time, not a wall meter reading.</li>
-            <li><b>Gaps.</b> Hours with no telemetry are left out, never filled in. Coverage is the share of time every node reported fresh data; per-node coverage is in the table.</li>
-            <li><b>Efficiency</b> only counts tokens and energy from time when all nodes were reporting.</li>
-            <li><b>Retention.</b> Hourly history is kept for 31 days. Longer ranges show what exists so far.</li>
+            {metered ? (
+              <>
+                <li><b>Metered.</b> Power is read at the outlet by external meters, so it includes power-supply losses and anything else on the same outlet.</li>
+                <li><b>Live, then reconciled.</b> sparkDash integrates the meters' live readings at once; a meter that keeps history (Home Assistant) then replaces them with its own 5-minute and hourly figures, which also cover time sparkDash was not running.</li>
+                <li><b>Gaps.</b> Time no meter recorded is left out, never filled in. Coverage is the share of time every node was metered; per-node coverage is in the table.</li>
+                <li><b>Efficiency</b> uses the token counts of the estimated accounting, in hours every node was metered.</li>
+                <li><b>Retention.</b> 5-minute detail is kept for 35 days and hourly totals for about five years; Monthly below covers all of it.</li>
+              </>
+            ) : (
+              <>
+                <li><b>Estimated.</b> Energy is power telemetry (GPU + CPU) integrated over time, not a wall meter reading.</li>
+                <li><b>Gaps.</b> Hours with no telemetry are left out, never filled in. Coverage is the share of time every node reported fresh data; per-node coverage is in the table.</li>
+                <li><b>Efficiency</b> only counts tokens and energy from time when all nodes were reporting.</li>
+                <li><b>Retention.</b> Hourly history is kept for 31 days. Longer ranges show what exists so far.</li>
+              </>
+            )}
             <li><b>Local time.</b> Hours and days follow the time zone in Settings, or this browser's by default ({activeTimeZone()}). Hourly rows are stored in UTC.</li>
-            <li><b>Membership.</b> Adding or removing a Spark starts a new accounting scope after a sparkDash restart.</li>
+            {metered ? null : <li><b>Membership.</b> Adding or removing a Spark starts a new accounting scope after a sparkDash restart.</li>}
           </ul>
         </section>
       </div>

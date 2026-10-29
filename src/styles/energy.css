@@ -41,6 +41,18 @@
 .en .en-banner b {
   color: var(--color-text-strong);
 }
+/* Power-meter status under the metered banner. */
+.en .en-meter-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 8px;
+}
+.en .en-meter-status__meter {
+  font-size: 12px;
+  color: var(--color-muted);
+}
 .en .en-banner--warn {
   border-color: color-mix(in srgb, var(--color-warning) 35%, transparent);
   background: color-mix(in srgb, var(--color-warning) 11%, transparent);

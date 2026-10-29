@@ -3,6 +3,8 @@ import { AppLink } from "../ui/AppLink";
 import { ENERGY_ID, idToPath } from "../../constants";
 import { useEffect, useState } from "react";
 import { fetchFleetEnergy } from "../../api/client";
+import { fetchMeteredEnergy } from "../../api/powerMeters";
+import { usePowerMeterStatus } from "../../hooks/usePowerMeters";
 import type { FleetEnergy } from "../../api/types";
 
 const DAY_MS = 86_400_000;
@@ -31,16 +33,19 @@ export function FleetEnergyCard({
 }) {
   const [data, setData] = useState<FleetEnergy | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // With power meters configured the card shows what they measured; otherwise the estimate.
+  const metered = usePowerMeterStatus()?.enabled === true;
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => fetchFleetEnergy()
+    setData(null);
+    const load = () => (metered ? fetchMeteredEnergy() : fetchFleetEnergy())
       .then((next) => { if (!cancelled) { setData(next); setError(null); } })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
     void load();
     const timer = window.setInterval(load, 10_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, []);
+  }, [metered]);
 
   // Fleet coverage is wall-clock time during which every node was fresh, so
   // it is capped by its measurement window — not window × nodeCount. Use the
@@ -52,7 +57,7 @@ export function FleetEnergyCard({
   const stale = (data?.staleNodeIds ?? []).map((id) => nodeNames?.[id] ?? id);
   const partialHelp =
     data && !data.membershipChanged && data.freshNodeCount < nodeCount
-      ? `Energy is estimated from each node's live GPU and CPU readings. ${
+      ? `${metered ? "Energy is measured at the wall by external power meters." : "Energy is estimated from each node's live GPU and CPU readings."} ${
           stale.length ? `No fresh reading from: ${stale.join(", ")}. ` : ""
         }A node that is offline, unreachable or not reporting power stops the fleet total from being measured for that time, so 24h coverage drops. It recovers by itself once the node reports again.`
       : null;
@@ -97,9 +102,9 @@ export function FleetEnergyCard({
       {data?.membershipChanged && !error ? <RestartButton /> : null}
       <div>
         <div className="big-num">{number(data?.energy24hKwh ?? null)}<small>kWh / 24 h</small></div>
-        <div className="ov-card__sub mono">Estimated, not wall-metered · 24h coverage {coverage.toFixed(1)}%</div>
+        <div className="ov-card__sub mono">{metered ? "Metered at the wall" : "Estimated, not wall-metered"} · 24h coverage {coverage.toFixed(1)}%</div>
       </div>
-      <div className="ov-bars" aria-label="Hourly estimated watts for the last 24 hours, with gaps shown empty">
+      <div className="ov-bars" aria-label={`Hourly ${metered ? "metered" : "estimated"} watts for the last 24 hours, with gaps shown empty`}>
         {hourly.map((watts, index) => (
           <span
             key={index}
