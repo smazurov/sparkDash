@@ -75,6 +75,7 @@ import {
   createFleetEnergyRuntime,
   registerFleetEnergyRoute,
 } from "./energy/FleetEnergyRuntime.js";
+import { createPowerMeterRuntime } from "./powermeter/runtime.js";
 import { testSparkConnectivity } from "./connectivity.js";
 import { TailscaleProbe } from "./collectors/TailscaleProbe.js";
 import { inspectStartupPreflight, logStartupPreflight } from "./startupPreflight.js";
@@ -460,10 +461,19 @@ function orderedSnapshots() {
     });
 }
 
+// Wall power from external meters (smart strips, PDUs, Home Assistant), recorded by the
+// fleet-energy tracker beside its estimate. Opt-in: inert unless config/power-meters.json exists.
+const powerMeters = createPowerMeterRuntime({
+  tracker: fleetEnergyTracker,
+  listUnits: () => registry.sparks,
+  recordEvent,
+});
+
 const fleetEnergyRuntime = createFleetEnergyRuntime({
   tracker: fleetEnergyTracker,
   orderedSnapshots,
   monitors,
+  wallReadings: powerMeters.wallReadings,
 });
 
 const unitHistoryRuntime = createUnitHistoryRuntime({
@@ -567,6 +577,7 @@ function clientKey(req) {
 
 // ─── REST API ────────────────────────────────────────────
 registerFleetEnergyRoute(app, fleetEnergyTracker);
+powerMeters.register(app);
 registerLlmTokenTotalsRoute(app, llmTokenLedger);
 app.get("/api/model-prices", createModelPricesHandler());
 registerAlertRoutes(app, alertsRuntime);
@@ -2252,7 +2263,7 @@ app.get("/metrics", (_req, res) => {
   // res.end, not res.send: send() reorders the media type parameters; keep the
   // header exactly as the exposition format spells it.
   res.setHeader("Content-Type", PROMETHEUS_CONTENT_TYPE);
-  res.end(renderPrometheusMetrics(entries));
+  res.end(renderPrometheusMetrics(entries) + powerMeters.renderPrometheus());
 });
 
 // ─── Static files (built frontend) ───────────────────────
@@ -2442,6 +2453,7 @@ if (!startupPreflight.fatal) {
     alertsRuntime.start();
     occupancy.start();
     fleetEnergyRuntime.start();
+    powerMeters.start();
     llmTokenRuntime.start();
   });
 } else {
@@ -2500,6 +2512,11 @@ async function shutdown(signal) {
     await occupancy.stop();
   } catch (err) {
     console.error("[sparkDash] failed to stop occupancy poller:", err.message);
+  }
+  try {
+    powerMeters.stop();
+  } catch (err) {
+    console.error("[sparkDash] failed to stop power meters:", err.message);
   }
   const energyPersistenceSucceeded = fleetEnergyRuntime.stop();
   const [streamAgentClosedGracefully] = await Promise.all([closeLlmStreamAgent(), mqttStopped]);
