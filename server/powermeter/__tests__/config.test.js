@@ -75,7 +75,7 @@ test("problems are collected across meters, units and options", () => {
   assert.match(error, /units\.spark-a\.channel: must be a Home Assistant entity id/);
   assert.match(error, /units\.spark-c\.meter must name a configured meter/);
   assert.match(error, /units\.spark-b\.since must be an ISO 8601 timestamp/);
-  assert.match(error, /pollIntervalMs must be an integer from 2000/);
+  assert.match(error, /pollIntervalMs must be an integer from 5000/);
 });
 
 test("history can be turned off and the backfill depth bounded", () => {

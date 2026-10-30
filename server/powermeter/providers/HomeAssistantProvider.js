@@ -12,6 +12,7 @@
  * leaves this module. A read-only HA user is enough.
  */
 import WebSocket from "ws";
+import { PowerMeterProvider } from "./PowerMeterProvider.js";
 
 const ENTITY_PATTERN = /^[a-z0-9_]+\.[a-z0-9_]+$/;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -30,30 +31,6 @@ const TLS_CODES = new Set([
   "CERT_HAS_EXPIRED",
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
-
-function validate(spec) {
-  const problems = [];
-  let url = null;
-  try {
-    url = new URL(spec.url);
-  } catch {
-    problems.push("url must be an absolute http(s) URL");
-  }
-  if (url && url.protocol !== "http:" && url.protocol !== "https:") problems.push("url must use http or https");
-  if (url && (url.username || url.password)) problems.push("url must not embed credentials; use tokenEnv");
-  if (spec.tokenEnv !== undefined && (typeof spec.tokenEnv !== "string" || !ENV_NAME_PATTERN.test(spec.tokenEnv))) {
-    problems.push("tokenEnv must be an environment variable name");
-  }
-  if ("token" in spec) problems.push("token must not be stored in the file; put it in an environment variable named by tokenEnv");
-  if (spec.timeoutMs !== undefined && (!Number.isInteger(spec.timeoutMs) || spec.timeoutMs < 500 || spec.timeoutMs > 60_000)) {
-    problems.push("timeoutMs must be an integer from 500 to 60000");
-  }
-  return problems;
-}
-
-function validateChannel(channel) {
-  return ENTITY_PATTERN.test(channel) ? null : "must be a Home Assistant entity id such as sensor.outlet_power";
-}
 
 /** Describe a fetch failure without leaking request headers. */
 function describeFetchError(error) {
@@ -163,29 +140,133 @@ function webSocketSession({ url, token, requests, timeoutMs, signal, WebSocketIm
   });
 }
 
-function create(spec, { env = process.env, fetchImpl = globalThis.fetch, WebSocketImpl = WebSocket, logger = console } = {}) {
-  const tokenEnv = spec.tokenEnv || DEFAULT_TOKEN_ENV;
-  const token = env[tokenEnv];
-  if (typeof token !== "string" || token.trim() === "") {
-    throw new Error(`environment variable ${tokenEnv} is not set`);
-  }
-  const base = String(spec.url).replace(/\/+$/, "");
-  const wsUrl = `${base.replace(/^http/, "ws")}/api/websocket`;
-  const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const warned = new Set();
-  const warnOnce = (key, message) => {
-    if (warned.has(key)) return;
-    warned.add(key);
-    logger.warn?.(`[powerMeters] ${message}`);
-  };
+export class HomeAssistantProvider extends PowerMeterProvider {
+  static type = "homeassistant";
+  static historyPeriods = Object.freeze(["5minute", "hour"]);
 
-  async function readOne(entityId, signal) {
-    const signals = [AbortSignal.timeout(timeoutMs)];
+  static validate(spec) {
+    const problems = [];
+    let url = null;
+    try {
+      url = new URL(spec.url);
+    } catch {
+      problems.push("url must be an absolute http(s) URL");
+    }
+    if (url && url.protocol !== "http:" && url.protocol !== "https:") problems.push("url must use http or https");
+    if (url && (url.username || url.password)) problems.push("url must not embed credentials; use tokenEnv");
+    if (spec.tokenEnv !== undefined && (typeof spec.tokenEnv !== "string" || !ENV_NAME_PATTERN.test(spec.tokenEnv))) {
+      problems.push("tokenEnv must be an environment variable name");
+    }
+    if ("token" in spec) problems.push("token must not be stored in the file; put it in an environment variable named by tokenEnv");
+    if (spec.timeoutMs !== undefined && (!Number.isInteger(spec.timeoutMs) || spec.timeoutMs < 500 || spec.timeoutMs > 60_000)) {
+      problems.push("timeoutMs must be an integer from 500 to 60000");
+    }
+    return problems;
+  }
+
+  static validateChannel(channel) {
+    return ENTITY_PATTERN.test(channel) ? null : "must be a Home Assistant entity id such as sensor.outlet_power";
+  }
+
+  // Private, so the token never shows up in JSON.stringify, util.inspect or a log line.
+  #token;
+  #base;
+  #wsUrl;
+  #timeoutMs;
+  #fetch;
+  #WebSocket;
+  #logger;
+  #warned = new Set();
+
+  constructor(spec, { env = process.env, fetchImpl = globalThis.fetch, WebSocketImpl = WebSocket, logger = console } = {}) {
+    super(spec);
+    const tokenEnv = spec.tokenEnv || DEFAULT_TOKEN_ENV;
+    const token = env[tokenEnv];
+    if (typeof token !== "string" || token.trim() === "") {
+      throw new Error(`environment variable ${tokenEnv} is not set`);
+    }
+    this.#token = token;
+    this.#base = String(spec.url).replace(/\/+$/, "");
+    this.#wsUrl = `${this.#base.replace(/^http/, "ws")}/api/websocket`;
+    this.#timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#fetch = fetchImpl;
+    this.#WebSocket = WebSocketImpl;
+    this.#logger = logger;
+  }
+
+  describe() {
+    return { type: HomeAssistantProvider.type, target: this.#base };
+  }
+
+  async readPower(channels, { signal } = {}) {
+    const readings = await Promise.all(channels.map((channel) => this.#readOne(channel, signal)));
+    return new Map(channels.map((channel, index) => [channel, readings[index]]));
+  }
+
+  async readHistory(channels, { fromMs, toMs: endMs, period, signal } = {}) {
+    if (!HomeAssistantProvider.historyPeriods.includes(period)) throw new Error(`unsupported history period ${period}`);
+    const [metadata, statistics] = await webSocketSession({
+      url: this.#wsUrl,
+      token: this.#token,
+      timeoutMs: HISTORY_TIMEOUT_MS,
+      signal,
+      WebSocketImpl: this.#WebSocket,
+      requests: [
+        { type: "recorder/get_statistics_metadata", statistic_ids: channels },
+        {
+          type: "recorder/statistics_during_period",
+          start_time: new Date(fromMs).toISOString(),
+          end_time: new Date(endMs).toISOString(),
+          statistic_ids: channels,
+          period,
+          types: ["mean", "max"],
+          units: { power: "W" },
+        },
+      ],
+    });
+    const usable = new Set();
+    for (const meta of Array.isArray(metadata) ? metadata : []) {
+      const unit = meta?.statistics_unit_of_measurement;
+      if (meta?.has_mean === false || meta?.mean_type === 0) {
+        this.#warnOnce(`${meta.statistic_id}:mean`, `${meta.statistic_id} keeps no mean statistics; no history for it`);
+        continue;
+      }
+      if (meta?.unit_class !== "power" && POWER_UNITS[unit] === undefined) {
+        this.#warnOnce(`${meta.statistic_id}:unit`, `${meta.statistic_id} statistics are in "${unit}", not power; no history for it`);
+        continue;
+      }
+      usable.add(meta.statistic_id);
+    }
+    const out = new Map();
+    for (const channel of channels) {
+      if (!usable.has(channel)) {
+        this.#warnOnce(`${channel}:none`, `${channel} has no long-term statistics (does it have a state_class?); no history for it`);
+        out.set(channel, []);
+        continue;
+      }
+      const rows = Array.isArray(statistics?.[channel]) ? statistics[channel] : [];
+      out.set(
+        channel,
+        rows
+          .map((row) => ({
+            startMs: toMs(row?.start),
+            endMs: toMs(row?.end),
+            meanW: Number.isFinite(row?.mean) ? Math.max(0, row.mean) : null,
+            maxW: Number.isFinite(row?.max) ? Math.max(0, row.max) : null,
+          }))
+          .filter((row) => row.startMs != null && row.endMs != null && row.endMs > row.startMs && row.meanW != null)
+      );
+    }
+    return out;
+  }
+
+  async #readOne(entityId, signal) {
+    const signals = [AbortSignal.timeout(this.#timeoutMs)];
     if (signal) signals.push(signal);
     let response;
     try {
-      response = await fetchImpl(`${base}/api/states/${encodeURIComponent(entityId)}`, {
-        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+      response = await this.#fetch(`${this.#base}/api/states/${encodeURIComponent(entityId)}`, {
+        headers: { authorization: `Bearer ${this.#token}`, accept: "application/json" },
         signal: AbortSignal.any(signals),
       });
     } catch (error) {
@@ -205,76 +286,9 @@ function create(spec, { env = process.env, fetchImpl = globalThis.fetch, WebSock
     return parseHomeAssistantState(body);
   }
 
-  return {
-    type: "homeassistant",
-    historyPeriods: ["5minute", "hour"],
-
-    describe() {
-      return { type: "homeassistant", target: base };
-    },
-
-    async readPower(channels, { signal } = {}) {
-      const readings = await Promise.all(channels.map((channel) => readOne(channel, signal)));
-      return new Map(channels.map((channel, index) => [channel, readings[index]]));
-    },
-
-    async readHistory(channels, { fromMs, toMs: endMs, period, signal } = {}) {
-      if (!["5minute", "hour"].includes(period)) throw new Error(`unsupported history period ${period}`);
-      const [metadata, statistics] = await webSocketSession({
-        url: wsUrl,
-        token,
-        timeoutMs: HISTORY_TIMEOUT_MS,
-        signal,
-        WebSocketImpl,
-        requests: [
-          { type: "recorder/get_statistics_metadata", statistic_ids: channels },
-          {
-            type: "recorder/statistics_during_period",
-            start_time: new Date(fromMs).toISOString(),
-            end_time: new Date(endMs).toISOString(),
-            statistic_ids: channels,
-            period,
-            types: ["mean", "max"],
-            units: { power: "W" },
-          },
-        ],
-      });
-      const usable = new Set();
-      for (const meta of Array.isArray(metadata) ? metadata : []) {
-        const unit = meta?.statistics_unit_of_measurement;
-        if (meta?.has_mean === false || (meta?.mean_type !== undefined && meta.mean_type === 0)) {
-          warnOnce(`${meta.statistic_id}:mean`, `${meta.statistic_id} keeps no mean statistics; no history for it`);
-          continue;
-        }
-        if (meta?.unit_class !== "power" && POWER_UNITS[unit] === undefined) {
-          warnOnce(`${meta.statistic_id}:unit`, `${meta.statistic_id} statistics are in "${unit}", not power; no history for it`);
-          continue;
-        }
-        usable.add(meta.statistic_id);
-      }
-      const out = new Map();
-      for (const channel of channels) {
-        if (!usable.has(channel)) {
-          warnOnce(`${channel}:none`, `${channel} has no long-term statistics (does it have a state_class?); no history for it`);
-          out.set(channel, []);
-          continue;
-        }
-        const rows = Array.isArray(statistics?.[channel]) ? statistics[channel] : [];
-        out.set(
-          channel,
-          rows
-            .map((row) => ({
-              startMs: toMs(row?.start),
-              endMs: toMs(row?.end),
-              meanW: Number.isFinite(row?.mean) ? Math.max(0, row.mean) : null,
-              maxW: Number.isFinite(row?.max) ? Math.max(0, row.max) : null,
-            }))
-            .filter((row) => row.startMs != null && row.endMs != null && row.endMs > row.startMs && row.meanW != null)
-        );
-      }
-      return out;
-    },
-  };
+  #warnOnce(key, message) {
+    if (this.#warned.has(key)) return;
+    this.#warned.add(key);
+    this.#logger.warn?.(`[powerMeters] ${message}`);
+  }
 }
-
-export const homeAssistantProvider = Object.freeze({ validate, validateChannel, create });

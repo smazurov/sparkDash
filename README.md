@@ -553,7 +553,7 @@ Publishing is best-effort: while the broker is unreachable sparkDash retries eve
 
 ## Power meters (wall power)
 
-Opt-in (off unless `config/power-meters.json` exists). The Energy page normally **estimates** power from GPU and CPU telemetry. If your units are on metered outlets — a smart strip or plug, a metered PDU, anything Home Assistant already reads — sparkDash can read those meters and show energy **measured at the wall**. Live readings appear within seconds and are replaced by the meter's own 5-minute and hourly record as it arrives; the first start backfills the meter's history. The Energy page gets a **Metered / Estimated** switch; the estimate keeps running unchanged beside it. Meters are pluggable providers, with Home Assistant first. Setup, reconciliation and the provider interface: [docs/POWER-METERS.md](./docs/POWER-METERS.md).
+Opt-in (off unless `config/power-meters.json` exists). The Energy page normally **estimates** power from GPU and CPU telemetry. If your units are on metered outlets — a smart strip or plug, a metered PDU, anything Home Assistant already reads — sparkDash records **wall power** in the same energy accounting, next to the estimate. The page then leads with wall power and draws the estimate and its GPU (measured) and CPU (modelled) parts beside it. Live readings appear within seconds and are replaced by the meter's own 5-minute and hourly record. The first start backfills the meter's history, and gaps are filled from the estimate at a ratio learned per unit. A status panel and the Activity log show whether each meter is connected. Meters are pluggable providers, with Home Assistant first. Setup, reconciliation and the provider interface: [docs/POWER-METERS.md](./docs/POWER-METERS.md).
 
 ---
 
@@ -852,7 +852,7 @@ sparkDash/
 │   ├── collectors/      SystemCollector, LlmProbe, ssh, RoCE, Windows (PowerShell)
 │   ├── health/          HealthEvaluator (findings)
 │   ├── energy/          Fleet energy tracker + monthly archive
-│   ├── powermeter/      Opt-in wall-power meters (providers, live + history reconciliation)
+│   ├── powermeter/      Opt-in wall-power meters: providers, polling, history reconciliation (recorded by energy/)
 │   ├── llmtokens/       Token ledger · events/ Activity log · metrics/ Unit history (GPU chart, Temps week, 48 h / 30 d tiers)
 │   ├── llmlaunch/       Model launchers · tooleval/ Tool Eval Bench
 │   ├── secretsStore.js  Encrypted password persistence
@@ -1040,7 +1040,6 @@ Copy `.env.example` to `.env` if needed:
 | `FLEET_ENERGY_JSON_PATH` | `config/fleet-energy.json` | Rolling fleet-energy persistence path |
 | `FLEET_ENERGY_MONTHLY_JSON_PATH` | `config/fleet-energy-monthly.json` | Permanent monthly energy archive |
 | `POWER_METERS_CONFIG_PATH` | `config/power-meters.json` | Opt-in [power meters](./docs/POWER-METERS.md): the feature runs only when this file exists |
-| `POWER_METER_ENERGY_JSON_PATH` | `config/power-meter-energy.json` | Metered energy store (5-minute and hourly buckets) |
 | `GPU_HISTORY_JSON_PATH` | `config/gpu-history.json` | 8 h GPU chart history |
 | `GPU_HISTORY_LONG_JSON_PATH` | `config/gpu-history-long.json` | 7-day minute-resolution GPU history (Temps page) |
 | `METRICS_HISTORY_JSON_PATH` | `config/metrics-history.json` | 48 h / 30 d unit history (only with `metricsHistory` on) |

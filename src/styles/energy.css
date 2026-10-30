@@ -41,17 +41,35 @@
 .en .en-banner b {
   color: var(--color-text-strong);
 }
-/* Power-meter status under the metered banner. */
-.en .en-meter-status {
+/* Power meters: configured, connected, how far the meter's own record reaches. */
+.en .en-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.en .en-meters__head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 10px;
-  margin-top: 8px;
+  font-size: 13px;
 }
-.en .en-meter-status__meter {
+.en .en-meters__target,
+.en .en-meters__note {
   font-size: 12px;
   color: var(--color-muted);
+}
+.en .en-meters__error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-danger);
+}
+.en .en-meters__units {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
 }
 .en .en-banner--warn {
   border-color: color-mix(in srgb, var(--color-warning) 35%, transparent);

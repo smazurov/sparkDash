@@ -1,21 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import express from "express";
 import { createPowerMeterRuntime } from "../runtime.js";
 import { validatePowerMeterConfig } from "../config.js";
-import { FINE_MS, HOUR_MS } from "../store.js";
+import { PowerMeterProvider } from "../providers/PowerMeterProvider.js";
+import { FleetEnergyTracker } from "../../energy/FleetEnergyTracker.js";
 
 const quiet = { warn() {}, log() {}, error() {} };
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 const T0 = Date.parse("2026-10-29T20:00:00Z");
+const SINCE = Date.parse("2026-08-13T00:00:00Z");
 
 function okConfig(overrides = {}) {
   const { config, error } = validatePowerMeterConfig({
     meters: { strip: { type: "homeassistant", url: "https://ha.lan" } },
     units: {
-      "spark-a": { meter: "strip", channel: "sensor.p3", since: "2026-10-29T00:00:00Z" },
+      "spark-a": { meter: "strip", channel: "sensor.p3", since: "2026-08-13T00:00:00Z" },
       "spark-b": { meter: "strip", channel: "sensor.p4" },
     },
     ...overrides,
@@ -24,46 +26,52 @@ function okConfig(overrides = {}) {
   return { status: "ok", filePath: "/test/power-meters.json", config };
 }
 
-/** A scriptable provider standing in for any meter. */
-function fakeProvider({ withHistory = true } = {}) {
-  const provider = {
-    type: "fake",
-    readings: new Map(),
-    history: { "5minute": new Map(), hour: new Map() },
-    historyCalls: [],
-    describe: () => ({ type: "fake", target: "fake://strip" }),
-    async readPower(channels) {
-      return new Map(channels.map((c) => [c, provider.readings.get(c) ?? { watts: null, atMs: null, error: "no data" }]));
-    },
-  };
-  if (withHistory) {
-    provider.historyPeriods = ["5minute", "hour"];
-    provider.readHistory = async (channels, { fromMs, toMs, period }) => {
-      provider.historyCalls.push({ period, fromMs, toMs });
-      return new Map(
-        channels.map((c) => [c, (provider.history[period].get(c) ?? []).filter((p) => p.startMs >= fromMs && p.endMs <= toMs)])
-      );
-    };
+/** A scriptable meter that keeps history, built on the real interface. */
+class FakeStrip extends PowerMeterProvider {
+  static type = "fake";
+  static historyPeriods = Object.freeze(["5minute", "hour"]);
+  readings = new Map();
+  history = { "5minute": new Map(), hour: new Map() };
+  calls = [];
+  failHistory = null;
+  describe() {
+    return { type: "fake", target: "fake://strip" };
   }
-  return provider;
+  async readPower(channels) {
+    return new Map(channels.map((c) => [c, this.readings.get(c) ?? { watts: null, atMs: null, error: "no data" }]));
+  }
+  async readHistory(channels, { fromMs, toMs, period }) {
+    this.calls.push({ period, fromMs, toMs });
+    if (this.failHistory) throw new Error(this.failHistory);
+    return new Map(channels.map((c) => [c, (this.history[period].get(c) ?? []).filter((p) => p.startMs >= fromMs && p.endMs <= toMs)]));
+  }
 }
 
-function harness({ provider = fakeProvider(), configResult = okConfig(), energyFilePath = null, createProviderFn } = {}) {
-  let now = T0 + 2 * HOUR_MS + 10_000;
+class LivePlug extends PowerMeterProvider {
+  static type = "plug";
+  async readPower(channels) {
+    return new Map(channels.map((c) => [c, { watts: 10, atMs: T0 }]));
+  }
+}
+
+function harness({ provider = new FakeStrip({}), configResult = okConfig(), createProviderFn, nodeIds = ["spark-a", "spark-b"] } = {}) {
+  let clock = T0 + 2 * HOUR + 10_000;
+  const tracker = new FleetEnergyTracker({ nodeIds, now: () => clock, load: false, setIntervalFn: null });
+  const events = [];
   const runtime = createPowerMeterRuntime({
     configResult,
-    energyFilePath,
-    now: () => now,
-    listUnits: () => [{ id: "spark-a", name: "Dan" }, { id: "spark-b", name: "Stepan" }],
+    tracker,
+    now: () => clock,
+    listUnits: () => nodeIds.map((id) => ({ id, name: id === "spark-a" ? "Dan" : "Stepan" })),
+    recordEvent: (e) => events.push(e),
     createProviderFn: createProviderFn ?? (() => provider),
     logger: quiet,
   });
-  return { runtime, provider, advance: (ms) => (now += ms), at: () => now };
+  return { runtime, tracker, provider, events, advance: (ms) => (clock += ms), at: () => clock };
 }
 
 async function serve(runtime) {
   const app = express();
-  app.use(express.json());
   runtime.register(app);
   const server = await new Promise((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
@@ -72,25 +80,20 @@ async function serve(runtime) {
   return { get: (p) => fetch(base + p), post: (p) => fetch(base + p, { method: "POST" }), close: () => new Promise((r) => server.close(r)) };
 }
 
+const hourRows = (from, count, meanW) =>
+  Array.from({ length: count }, (_, i) => ({ startMs: from + i * HOUR, endMs: from + (i + 1) * HOUR, meanW }));
+
 test("without a config file the runtime is inert and says so", async (t) => {
   let created = 0;
-  const runtime = createPowerMeterRuntime({
-    configResult: { status: "absent" },
-    createProviderFn: () => created++,
-    logger: quiet,
-  });
+  const runtime = createPowerMeterRuntime({ configResult: { status: "absent" }, createProviderFn: () => created++, logger: quiet });
   assert.equal(runtime.enabled, false);
   runtime.start();
   assert.equal(created, 0);
+  assert.equal(runtime.wallReadings(), null);
   assert.equal(runtime.renderPrometheus(), "");
   const http = await serve(runtime);
   t.after(http.close);
   assert.deepEqual(await (await http.get("/api/power-meters")).json(), { enabled: false, state: "absent" });
-  for (const p of ["/api/power-meters/energy", "/api/power-meters/energy/history", "/api/power-meters/energy/monthly"]) {
-    const res = await http.get(p);
-    assert.equal(res.status, 404, p);
-    assert.match((await res.json()).error, /not configured/);
-  }
   assert.equal((await http.post("/api/power-meters/reconcile")).status, 404);
 });
 
@@ -99,83 +102,117 @@ test("an invalid file keeps the feature off and reports why", () => {
   assert.deepEqual(runtime.status(), { enabled: false, state: "invalid", error: "units must map…" });
 });
 
-test("fresh polls integrate live energy; stale or missing readings do not", async () => {
-  const { runtime, provider, advance, at } = harness();
+test("readings are cached: wallReadings returns only fresh ones and never asks the meter", async () => {
+  const { runtime, provider, at, advance } = harness();
+  let reads = 0;
+  const original = provider.readPower.bind(provider);
+  provider.readPower = (...args) => {
+    reads += 1;
+    return original(...args);
+  };
   provider.readings.set("sensor.p3", { watts: 60, atMs: at() - 2_000 });
-  provider.readings.set("sensor.p4", { watts: 40, atMs: at() - 2_000 });
+  provider.readings.set("sensor.p4", { watts: 40, atMs: at() - 5 * MINUTE });
   await runtime.pollOnce();
-  advance(10_000);
-  provider.readings.set("sensor.p3", { watts: 60, atMs: at() - 1_000 });
-  // b's meter stopped reporting 5 minutes ago: stale, so nothing is integrated for it.
-  provider.readings.set("sensor.p4", { watts: 40, atMs: at() - 5 * 60_000 });
-  await runtime.pollOnce();
-  const bucketStart = Math.floor(at() / FINE_MS) * FINE_MS;
-  assert.equal(runtime.store.fineBuckets("spark-a", bucketStart - FINE_MS, bucketStart + FINE_MS).size > 0, true);
-  const aWh = [...runtime.store.fineBuckets("spark-a", 0, Infinity).values()].reduce((s, b) => s + b.wh, 0);
-  assert.ok(Math.abs(aWh - (60 * 10) / 3600) < 1e-9);
-  assert.equal(runtime.store.fineBuckets("spark-b", 0, Infinity).size, 0);
+  for (let i = 0; i < 5; i += 1) runtime.wallReadings();
+  assert.equal(reads, 1);
+  assert.deepEqual([...runtime.wallReadings()], [["spark-a", 60]]);
+  // The cached reading itself goes stale as time passes.
+  advance(40_000);
+  assert.deepEqual([...runtime.wallReadings()], []);
 
-  const status = runtime.status();
-  assert.equal(status.enabled, true);
-  const [a, b] = status.units;
-  assert.deepEqual([a.name, a.fresh, a.watts], ["Dan", true, 60]);
+  const [a, b] = runtime.status().units;
+  assert.deepEqual([a.name, a.known, a.recorded, a.watts], ["Dan", true, true, 60]);
   assert.deepEqual([b.fresh, b.error], [false, "reading is stale"]);
-  assert.match(status.meters[0].error, /spark-b: reading is stale/);
-  assert.match(runtime.renderPrometheus(), /sparkdash_wall_power_watts\{unit="spark-a",meter="strip"\} 60\n/);
-  assert.doesNotMatch(runtime.renderPrometheus(), /spark-b/);
-  // Full-fleet samples only while every unit is fresh.
-  assert.equal(runtime.live().currentWatts30s, 100);
 });
 
-test("reconciliation backfills from since, then replaces live buckets with the meter's", async () => {
-  const { runtime, provider, advance, at } = harness();
-  const since = Date.parse("2026-10-29T00:00:00Z");
-  const hourRows = (channel, w) =>
-    Array.from({ length: 22 }, (_, i) => ({ startMs: since + i * HOUR_MS, endMs: since + (i + 1) * HOUR_MS, meanW: w }));
-  provider.history.hour.set("sensor.p3", [{ startMs: since - HOUR_MS, endMs: since, meanW: 0 }, ...hourRows("sensor.p3", 55)]);
-  provider.history.hour.set("sensor.p4", hourRows("sensor.p4", 45));
-
-  // Live data for the current 5-minute bucket first.
-  provider.readings.set("sensor.p3", { watts: 80, atMs: at() });
-  provider.readings.set("sensor.p4", { watts: 80, atMs: at() });
+test("health changes are announced in the activity log and exported", async () => {
+  const { runtime, provider, events, at } = harness();
+  const both = (watts) => {
+    provider.readings.set("sensor.p3", { watts, atMs: at() });
+    provider.readings.set("sensor.p4", { watts, atMs: at() });
+  };
+  both(50);
   await runtime.pollOnce();
-  advance(10_000);
-  provider.readings.set("sensor.p3", { watts: 80, atMs: at() });
-  provider.readings.set("sensor.p4", { watts: 80, atMs: at() });
   await runtime.pollOnce();
-  const liveStart = T0 + 2 * HOUR_MS;
-  assert.equal(runtime.store.fineBuckets("spark-a", 0, Infinity).get(liveStart)?.src, "live");
+  provider.readings.set("sensor.p4", { watts: null, atMs: at(), error: "entity is unavailable" });
+  await runtime.pollOnce();
+  await runtime.pollOnce();
+  both(50);
+  await runtime.pollOnce();
+  assert.deepEqual(
+    events.map((e) => [e.type, e.severity]),
+    [
+      ["power-meter.connected", "success"],
+      ["power-meter.unreachable", "error"],
+      ["power-meter.recovered", "success"],
+    ]
+  );
+  assert.match(events[0].message, /Home Assistant power meter "strip" \(fake:\/\/strip\) connected: 2 units reporting wall power/);
+  assert.match(events[1].message, /spark-b: entity is unavailable/);
+  const metrics = runtime.renderPrometheus();
+  assert.match(metrics, /sparkdash_power_meter_up\{meter="strip",type="homeassistant"\} 1\n/);
+  assert.match(metrics, /sparkdash_wall_power_watts\{unit="spark-a",meter="strip"\} 50\n/);
+  assert.equal(runtime.status().meters[0].health, "ok");
+});
 
+test("the first pass backfills: window minutes into the tracker, older hours into months", async () => {
+  const { runtime, tracker, provider, events, at } = harness();
+  const windowStart = tracker.windowStartMs(at());
+  const from = windowStart - 10 * HOUR;
+  provider.history.hour.set("sensor.p3", hourRows(from, 12, 55));
+  provider.history.hour.set("sensor.p4", hourRows(from, 12, 45));
+  const fiveMin = Math.floor((at() - 10 * MINUTE) / (5 * MINUTE)) * 5 * MINUTE;
+  provider.history["5minute"].set("sensor.p3", [{ startMs: fiveMin, endMs: fiveMin + 5 * MINUTE, meanW: 70 }]);
+
+  assert.equal(runtime.settledBefore(), -Infinity, "nothing settles before the first pass");
   await runtime.reconcileOnce();
-  const hourCall = provider.historyCalls.find((c) => c.period === "hour");
-  // Backfill starts at the earliest unit's since (b has none, so the backfill window bounds it).
-  assert.ok(hourCall.fromMs <= since);
-  const hours = runtime.store.hours("spark-a", since - HOUR_MS, since + 22 * HOUR_MS);
-  assert.equal(hours.has(since - HOUR_MS), false, "since filters the outlet's earlier readings");
-  assert.equal(hours.get(since).wh, 55);
+  const hourCall = provider.calls.find((c) => c.period === "hour");
+  assert.ok(hourCall.fromMs <= SINCE + HOUR, "backfill starts at the earliest since");
+
+  // 10 hours before the window went to Monthly; the 2 inside it into minute buckets.
+  const months = tracker.monthlySnapshot().months;
+  const imported = months.reduce((sum, m) => sum + (m.nodes["spark-a"]?.wallWh ?? 0), 0);
+  assert.ok(imported >= 10 * 55 - 1e-6, `imported ${imported}`);
+  const rows = tracker.history(at()).hourly;
+  assert.equal(rows.find((r) => r.t === windowStart)?.nodeWallWh["spark-a"], 55);
+  assert.equal(rows.find((r) => r.t === windowStart)?.nodeWallMeteredMs["spark-a"], HOUR);
+
+  const unit = runtime.status().units[0];
+  assert.equal(unit.reconciledThroughMs, fiveMin + 5 * MINUTE);
+  // spark-b has no recent figures from the meter, so it settles an hour behind.
+  assert.equal(runtime.settledBefore(), Math.min(fiveMin + 5 * MINUTE, at() - HOUR));
   assert.equal(runtime.status().meters[0].history.state, "ok");
+  assert.deepEqual(events.map((e) => e.type), ["power-meter.history-loaded"]);
 
-  // The meter's 5-minute row for the live bucket arrives and wins.
-  advance(5 * 60_000);
-  provider.history["5minute"].set("sensor.p3", [{ startMs: liveStart, endMs: liveStart + FINE_MS, meanW: 70 }]);
-  provider.historyCalls.length = 0;
+  // Steady state: no second backfill, a short 5-minute lookback, no hourly fetch within the hour.
+  provider.calls.length = 0;
   await runtime.reconcileOnce();
-  const bucket = runtime.store.fineBuckets("spark-a", liveStart, liveStart + 1).get(liveStart);
-  assert.deepEqual([bucket.src, bucket.wh], ["meter", (70 * 5) / 60]);
-  assert.equal(runtime.status().units[0].reconciledThroughMs, liveStart + FINE_MS);
-  // Steady state: no second backfill, and no hourly fetch within the same hour.
-  assert.ok(provider.historyCalls.every((c) => c.period === "5minute"));
-  assert.ok(provider.historyCalls.every((c) => c.fromMs >= at() - 6 * HOUR_MS - FINE_MS));
+  assert.ok(provider.calls.every((c) => c.period === "5minute" && c.fromMs >= at() - 6 * HOUR - 5 * MINUTE));
+  assert.deepEqual(events.map((e) => e.type), ["power-meter.history-loaded"]);
 });
 
-test("a meter without history stays live-only", async () => {
-  const provider = fakeProvider({ withHistory: false });
-  const { runtime } = harness({ provider });
+test("a failing history keeps live readings and is announced once", async () => {
+  const { runtime, provider, events } = harness();
+  provider.failHistory = "Home Assistant WebSocket timed out";
+  await runtime.reconcileOnce();
+  await runtime.reconcileOnce();
+  const meter = runtime.status().meters[0];
+  assert.equal(meter.history.state, "error");
+  assert.match(meter.history.lastError, /timed out/);
+  assert.deepEqual(events.map((e) => e.type), ["power-meter.history-failed"]);
+  provider.failHistory = null;
+  await runtime.reconcileOnce();
+  assert.deepEqual(events.map((e) => e.type), ["power-meter.history-failed", "power-meter.history-loaded", "power-meter.history-recovered"]);
+});
+
+test("a meter without history settles at once and stays live-only", async () => {
+  const { runtime } = harness({ provider: new LivePlug({}) });
   await runtime.reconcileOnce();
   assert.equal(runtime.status().meters[0].history.state, "unsupported");
+  assert.equal(runtime.settledBefore(), Infinity);
 });
 
-test("a meter that cannot start marks its units, without stopping the rest", async () => {
+test("a meter that cannot start marks its units without stopping the runtime", async () => {
   const { runtime } = harness({
     createProviderFn: () => {
       throw new Error("environment variable HOME_ASSISTANT_TOKEN is not set");
@@ -184,40 +221,44 @@ test("a meter that cannot start marks its units, without stopping the rest", asy
   await runtime.pollOnce();
   await runtime.reconcileOnce();
   const status = runtime.status();
-  assert.equal(status.meters[0].ok, false);
+  assert.equal(status.meters[0].health, "unavailable");
   assert.match(status.meters[0].error, /HOME_ASSISTANT_TOKEN/);
-  assert.equal(status.meters[0].history.state, "unavailable");
   assert.equal(status.units[0].error, "environment variable HOME_ASSISTANT_TOKEN is not set");
-  assert.equal(runtime.live().freshNodeCount, 0);
+  assert.deepEqual([...runtime.wallReadings()], []);
 });
 
-test("routes serve the metered contracts and stop() persists the store", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "power-meter-runtime-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const energyFilePath = path.join(dir, "power-meter-energy.json");
-  const { runtime, provider, advance, at } = harness({ energyFilePath });
-  for (let i = 0; i < 3; i += 1) {
-    provider.readings.set("sensor.p3", { watts: 60, atMs: at() });
-    provider.readings.set("sensor.p4", { watts: 40, atMs: at() });
-    await runtime.pollOnce();
-    advance(10_000);
-  }
+test("a provider must implement the interface", () => {
+  const { runtime } = harness({ createProviderFn: () => ({ readPower: async () => new Map() }) });
+  assert.match(runtime.status().meters[0].error, /does not extend PowerMeterProvider/);
+});
+
+test("a unit moved to another outlet loses its old wall minutes, not its months", async () => {
+  const first = harness();
+  first.tracker.applyWallPeriods("spark-a", [{ startMs: T0, endMs: T0 + HOUR, meanW: 50 }]);
+  first.tracker.setWallState("spark-a", { key: "strip|homeassistant|sensor.old", marks: {}, backfill: "x" });
+  // Same tracker, new config pointing spark-a at sensor.p3.
+  createPowerMeterRuntime({ configResult: okConfig(), tracker: first.tracker, now: first.at, createProviderFn: () => first.provider, logger: quiet });
+  const row = first.tracker.history(first.at()).hourly.find((r) => r.t === T0);
+  assert.equal(row?.nodeWallWh?.["spark-a"] ?? 0, 0);
+  assert.equal(first.tracker.wallState("spark-a"), null);
+});
+
+test("units the registry does not know are shown but not recorded", () => {
+  const { runtime, tracker } = harness({ nodeIds: ["spark-a"] });
+  assert.deepEqual(tracker.wallNodeIds, ["spark-a"]);
+  const b = runtime.status().units.find((u) => u.id === "spark-b");
+  assert.deepEqual([b.known, b.recorded], [false, false]);
+});
+
+test("status and reconcile routes", async (t) => {
+  const { runtime } = harness();
   const http = await serve(runtime);
   t.after(http.close);
-  const live = await (await http.get("/api/power-meters/energy")).json();
-  assert.equal(live.estimated, false);
-  assert.equal(live.source, "meter");
-  assert.deepEqual(live.trackedNodeIds, ["spark-a", "spark-b"]);
-  const history = await (await http.get("/api/power-meters/energy/history")).json();
-  assert.equal(history.hourly.length, 1);
-  assert.ok(history.hourly[0].fleetEnergyWh > 0);
-  const monthly = await (await http.get("/api/power-meters/energy/monthly")).json();
-  assert.equal(monthly.months.length, 1);
-  const reconcile = await http.post("/api/power-meters/reconcile");
-  assert.equal(reconcile.status, 200);
-
-  assert.equal(runtime.stop(), true);
-  const saved = JSON.parse(fs.readFileSync(energyFilePath, "utf8"));
-  assert.deepEqual(Object.keys(saved.units).sort(), ["spark-a", "spark-b"]);
-  assert.equal(saved.units["spark-a"].key, "strip|homeassistant|sensor.p3");
+  const status = await (await http.get("/api/power-meters")).json();
+  assert.equal(status.enabled, true);
+  assert.equal(status.meters[0].target, "fake://strip");
+  assert.equal(status.pollIntervalMs, 10_000);
+  const reconciled = await http.post("/api/power-meters/reconcile");
+  assert.equal(reconciled.status, 200);
+  assert.equal((await reconciled.json()).meters[0].history.state, "ok");
 });

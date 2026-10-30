@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { WebSocketServer } from "ws";
-import { homeAssistantProvider, parseHomeAssistantState } from "../providers/homeassistant.js";
+import { HomeAssistantProvider, parseHomeAssistantState } from "../providers/HomeAssistantProvider.js";
+import { PowerMeterProvider } from "../providers/PowerMeterProvider.js";
 
 const TOKEN = "test-token-123";
 
@@ -77,11 +78,11 @@ test("state parsing converts units, prefers last_reported and never invents zero
 
 test("the provider refuses to start without its token variable", () => {
   assert.throws(
-    () => homeAssistantProvider.create({ type: "homeassistant", url: "https://ha.lan" }, { env: {} }),
+    () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: {} }),
     /environment variable HOME_ASSISTANT_TOKEN is not set/
   );
   assert.throws(
-    () => homeAssistantProvider.create({ type: "homeassistant", url: "https://ha.lan", tokenEnv: "X_TOKEN" }, { env: {} }),
+    () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan", tokenEnv: "X_TOKEN" }, { env: {} }),
     /X_TOKEN/
   );
 });
@@ -94,18 +95,21 @@ test("readPower sends the bearer token and reports per-channel failures", async 
     },
   });
   t.after(ha.close);
-  const provider = homeAssistantProvider.create(
+  const provider = new HomeAssistantProvider(
     { type: "homeassistant", url: `${ha.url}/`, tokenEnv: "HA" },
     { env: { HA: TOKEN }, logger: quietLogger }
   );
+  assert.ok(provider instanceof PowerMeterProvider);
   assert.deepEqual(provider.describe(), { type: "homeassistant", target: ha.url });
+  assert.equal(provider.supportsHistory, true);
+  assert.doesNotMatch(JSON.stringify(provider), new RegExp(TOKEN));
   const readings = await provider.readPower(["sensor.outlet_3_power", "sensor.outlet_4_power", "sensor.gone"]);
   assert.equal(readings.get("sensor.outlet_3_power").watts, 57.2);
   assert.deepEqual(readings.get("sensor.outlet_4_power"), { watts: null, atMs: Date.parse("2026-10-29T21:36:28Z"), error: "entity is unavailable" });
   assert.equal(readings.get("sensor.gone").error, "entity not found");
   assert.ok(ha.seen.rest.every((r) => r.auth === `Bearer ${TOKEN}`));
 
-  const wrong = homeAssistantProvider.create({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "nope" } });
+  const wrong = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "nope" } });
   const rejected = await wrong.readPower(["sensor.outlet_3_power"]);
   assert.match(rejected.get("sensor.outlet_3_power").error, /rejected the token \(HTTP 401\)/);
 });
@@ -126,7 +130,7 @@ test("readHistory authenticates over WebSocket and returns watt periods per chan
     },
   });
   t.after(ha.close);
-  const provider = homeAssistantProvider.create({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger });
+  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger });
   const history = await provider.readHistory(["sensor.outlet_3_power", "sensor.outlet_energy", "sensor.unknown"], {
     fromMs: start,
     toMs: start + 3_600_000,
@@ -148,6 +152,6 @@ test("readHistory authenticates over WebSocket and returns watt periods per chan
 test("readHistory rejects a token Home Assistant does not accept", async (t) => {
   const ha = await fakeHomeAssistant();
   t.after(ha.close);
-  const provider = homeAssistantProvider.create({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "wrong" } });
+  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "wrong" } });
   await assert.rejects(provider.readHistory(["sensor.x"], { fromMs: 0, toMs: 1, period: "hour" }), /rejected the token/);
 });

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchMonthlyEnergy } from "../../api/client";
-import { fetchMeteredMonthlyEnergy } from "../../api/powerMeters";
 import type { MonthlyEnergy as MonthlyEnergyData, MonthlyEnergyMonth } from "../../api/types";
 import { StackedBarChart, type BarSeries } from "../ui/StackedBarChart";
 import { Tag } from "../ui/Tag";
 import { formatKwh, formatMoney } from "./energyStats";
+import { wallMonth } from "./wallStats";
 import {
   fleetCoverage,
   monthLabel,
@@ -32,15 +32,12 @@ export function MonthlyEnergy({
   price,
   currency,
   reloadToken = 0,
-  source = "estimate",
 }: {
   nameOf: (id: string) => string;
   price: number | null;
   currency: string;
   /** Change this value (e.g. after a Reset) to refetch immediately. */
   reloadToken?: number;
-  /** "meter" reads the optional power meters' roll-up instead of the estimate's archive. */
-  source?: "meter" | "estimate";
 }) {
   const [data, setData] = useState<MonthlyEnergyData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,27 +45,16 @@ export function MonthlyEnergy({
   const [month, setMonth] = useState<string | null>(null);
   const [year, setYear] = useState<number | null>(null);
 
-  const sourceRef = useRef(source);
-  sourceRef.current = source;
-  const load = useCallback(() => {
-    const asked = source;
-    return (asked === "meter" ? fetchMeteredMonthlyEnergy() : fetchMonthlyEnergy())
-      .then((next) => {
-        if (sourceRef.current !== asked) return;
-        setData(next);
-        setError(null);
-      })
-      .catch((err) => {
-        if (sourceRef.current === asked) setError(err instanceof Error ? err.message : String(err));
-      });
-  }, [source]);
-  const lastSource = useRef(source);
-  useEffect(() => {
-    if (lastSource.current === source) return;
-    lastSource.current = source;
-    setData(null);
-    setError(null);
-  }, [source]);
+  const load = useCallback(
+    () =>
+      fetchMonthlyEnergy()
+        .then((next) => {
+          setData(next);
+          setError(null);
+        })
+        .catch((err) => setError(err instanceof Error ? err.message : String(err))),
+    []
+  );
   useEffect(() => {
     void load();
     const timer = window.setInterval(() => {
@@ -84,7 +70,9 @@ export function MonthlyEnergy({
   }, [reloadToken, load]);
 
   const now = data?.generatedAt ?? 0;
-  const months = useMemo(() => data?.months ?? [], [data]);
+  // A month with wall power (measured, gaps filled) is shown at the wall; others stay estimated.
+  const raw = useMemo(() => new Map((data?.months ?? []).map((m) => [m.month, m])), [data]);
+  const months = useMemo(() => (data?.months ?? []).map((m) => wallMonth(m) ?? m), [data]);
   const monthKeys = useMemo(() => monthOptions(months, now), [months, now]);
   const years = useMemo(() => yearOptions(months, now), [months, now]);
   const colorOf = useMemo(() => nodeColors(months), [months]);
@@ -99,9 +87,7 @@ export function MonthlyEnergy({
         <div>
           <h2 id="en-h-monthly">Monthly history</h2>
           <p className="en-panel__sub">
-            {source === "meter"
-              ? "Metered totals per UTC month, from the meters' records and live readings, kept for about five years. Months are UTC, so they will not match a local-time electricity bill."
-              : "Totals per UTC month, kept permanently. They survive resets, restarts and changes to the fleet. Months are UTC, so they will not match a local-time electricity bill."}
+            Totals per UTC month, kept permanently. They survive resets, restarts and changes to the fleet. Months are UTC, so they will not match a local-time electricity bill.
           </p>
         </div>
         {data && months.length > 0 ? (
@@ -140,7 +126,7 @@ export function MonthlyEnergy({
           colorOf={colorOf}
           price={price}
           currency={currency}
-          metered={data.estimated === false}
+          estimate={raw.get(activeMonth) ?? null}
         />
       ) : (
         <YearView months={months} year={activeYear} nameOf={nameOf} colorOf={colorOf} price={price} currency={currency} />
@@ -157,8 +143,9 @@ function MonthView({
   colorOf,
   price,
   currency,
-  metered = false,
-}: ViewProps & { month: MonthlyEnergyMonth | null; label: string; now: number; metered?: boolean }) {
+  estimate = null,
+}: ViewProps & { month: MonthlyEnergyMonth | null; label: string; now: number; estimate?: MonthlyEnergyMonth | null }) {
+  const metered = month?.totalWallWh != null;
   if (!month || month.totalWh <= 0) {
     return <p className="en-panel__sub" role="status">No energy was recorded in {label}.</p>;
   }
@@ -176,6 +163,12 @@ function MonthView({
           <b className="mono">{eff != null ? `${eff < 10 ? eff.toFixed(2) : eff.toFixed(1)} Wh / 1k tok` : "—"}</b>
         </div>
         <div><span className="eyebrow">Fleet coverage</span><b className="mono">{pct(fleetCoverage(month, now))}</b></div>
+        {metered ? (
+          <div>
+            <span className="eyebrow">Estimate</span>
+            <b className="mono">{estimate && estimate.totalWh > 0 ? `${formatKwh(estimate.totalWh / 1000)} kWh` : "—"}</b>
+          </div>
+        ) : null}
         <div>
           <span className="eyebrow">Status</span>
           <Tag tone={month.closed ? "good" : "warn"}>{month.closed ? "Closed" : "Open, still counting"}</Tag>
@@ -211,7 +204,10 @@ function MonthView({
       </div>
       <p className="en-panel__sub en-panel__foot">
         Only the Sparks that reported in {label} are listed. Coverage is the share of the month each one was measured
-        {month.closed ? "" : " so far"}. {metered ? "Metered at the wall." : "Estimated, not metered."}
+        {month.closed ? "" : " so far"}.{" "}
+        {metered
+          ? `Measured at the wall${(month.totalWallFilledWh ?? 0) > 0 ? `; ${pct((month.totalWallFilledWh ?? 0) / month.totalWh)} filled from the estimate where no meter read` : ""}.`
+          : "Estimated, not metered."}
       </p>
     </>
   );

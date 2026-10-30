@@ -461,17 +461,19 @@ function orderedSnapshots() {
     });
 }
 
+// Wall power from external meters (smart strips, PDUs, Home Assistant), recorded by the
+// fleet-energy tracker beside its estimate. Opt-in: inert unless config/power-meters.json exists.
+const powerMeters = createPowerMeterRuntime({
+  tracker: fleetEnergyTracker,
+  listUnits: () => registry.sparks,
+  recordEvent,
+});
+
 const fleetEnergyRuntime = createFleetEnergyRuntime({
   tracker: fleetEnergyTracker,
   orderedSnapshots,
   monitors,
-});
-
-// Wall power from external meters (smart strips, PDUs, Home Assistant). Opt-in: inert
-// unless config/power-meters.json exists. Borrows only the estimate's token counts.
-const powerMeters = createPowerMeterRuntime({
-  listUnits: () => registry.sparks,
-  tokensByHour: () => new Map(fleetEnergyTracker.history().hourly.map((row) => [row.t, row.outputTokens])),
+  wallReadings: powerMeters.wallReadings,
 });
 
 const unitHistoryRuntime = createUnitHistoryRuntime({

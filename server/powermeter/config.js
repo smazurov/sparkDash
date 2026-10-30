@@ -15,13 +15,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ROOT } from "../config.js";
-import { PROVIDER_TYPES } from "./providers/index.js";
+import { providerClass, providerTypes } from "./providers/index.js";
 
 export const POWER_METERS_CONFIG_PATH =
   process.env.POWER_METERS_CONFIG_PATH || path.join(ROOT, "config", "power-meters.json");
 
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
-const MIN_POLL_INTERVAL_MS = 2_000;
+// HA-style meters report every few seconds at most; polling faster only adds load.
+const MIN_POLL_INTERVAL_MS = 5_000;
 const MAX_POLL_INTERVAL_MS = 300_000;
 const DEFAULT_BACKFILL_DAYS = 400;
 const MAX_BACKFILL_DAYS = 3650;
@@ -61,9 +62,9 @@ export function validatePowerMeterConfig(raw) {
         problems.push(`meters.${id} must be an object`);
         continue;
       }
-      const provider = PROVIDER_TYPES[spec.type];
+      const provider = providerClass(spec.type);
       if (!provider) {
-        problems.push(`meters.${id}.type must be one of: ${Object.keys(PROVIDER_TYPES).join(", ")}`);
+        problems.push(`meters.${id}.type must be one of: ${providerTypes().join(", ")}`);
         continue;
       }
       for (const problem of provider.validate(spec)) problems.push(`meters.${id}: ${problem}`);
@@ -88,7 +89,7 @@ export function validatePowerMeterConfig(raw) {
         problems.push(`units.${unitId}.channel must be a non-empty string`);
         continue;
       }
-      const provider = PROVIDER_TYPES[raw.meters[spec.meter]?.type];
+      const provider = providerClass(raw.meters[spec.meter]?.type);
       const channelProblem = provider?.validateChannel?.(spec.channel);
       if (channelProblem) {
         problems.push(`units.${unitId}.channel: ${channelProblem}`);
