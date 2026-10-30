@@ -620,7 +620,6 @@ function EnergyBody({
               <>
                 <li><b>Wall.</b> {meterLabel}, per outlet; power-supply losses included.</li>
                 <li><b>Gaps</b> are filled from GPU + CPU + 23 W, scaled by the ratio learned over 7 days ({Object.entries(live?.wall?.ratios ?? {}).map(([id, r]) => `${nameOf(id)} ${formatRatio(r)}`).join(", ") || "not learned yet"}).</li>
-                <li><b>GPU</b> is measured; <b>CPU</b> is modelled from utilization.</li>
               </>
             ) : (
               <>

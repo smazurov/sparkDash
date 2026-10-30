@@ -115,6 +115,11 @@ energy is kept apart from measured energy in every payload (`…FilledWh`/`…Fi
 page says how much of a range was filled. Time neither the meter nor the estimate covered is
 left out.
 
+**On disk.** Minutes that only hold wall data (a backfill) are stored without the estimate's
+empty fields, and the new fields are rounded to a microwatt-hour. `fleet-energy.json` is rewritten
+in full at most hourly and on shutdown; every 30 s only the minutes changed since then go to
+`fleet-energy.recent.json`, which loading merges back in.
+
 Coverage and efficiency follow the estimate's rules. Per-unit figures count while that unit was
 covered, fleet figures only while every unit was. Wh per token counts minutes the whole fleet
 was covered.
