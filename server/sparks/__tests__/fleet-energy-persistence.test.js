@@ -167,3 +167,35 @@ test("a recent file that belongs to an older full write is ignored", (t) => {
   const reloaded = env.make();
   assert.equal(reloaded.history(T0 + HOUR).hourly.some((r) => (r.nodeWallWh?.a ?? 0) >= 100), false);
 });
+
+test("the meter's figures fetched again after a restart are not a change", (t) => {
+  const env = setup(t);
+  const periods = [{ startMs: T0 - 10 * MINUTE, endMs: T0 - 5 * MINUTE, meanW: 113.123456789 }];
+  const first = env.make();
+  first.applyWallPeriods("a", periods);
+  first.close();
+  const second = env.make();
+  second.applyWallPeriods("a", periods);
+  assert.equal(second.flushRecent(), false, "nothing to write");
+  assert.equal(fs.existsSync(env.recentPath), false);
+});
+
+for (const [name, content] of [
+  ["from another scope", (raw) => ({ ...raw, nodeIds: ["a", "c"] })],
+  ["with an unknown version", (raw) => ({ ...raw, version: 99 })],
+  ["that loading had to repair", (raw) => ({ ...raw, buckets: [...raw.buckets, { minuteStartMs: 7 }] })],
+]) {
+  test(`a file ${name} is never the base of a recent-only write`, (t) => {
+    const env = setup(t);
+    const first = env.make();
+    feed(env, first, T0, T0 + MINUTE);
+    first.close();
+    fs.writeFileSync(env.filePath, JSON.stringify(content(env.read(env.filePath))));
+    const second = env.make();
+    feed(env, second, T0 + MINUTE + 2000, T0 + 2 * MINUTE);
+    env.tick();
+    assert.equal(fs.existsSync(env.recentPath), false, "the first write is a full one");
+    assert.deepEqual(env.read(env.filePath).nodeIds, ["a", "b"]);
+    assert.equal(env.read(env.filePath).version, 1);
+  });
+}

@@ -26,8 +26,6 @@ const PERSISTENCE_RELATIVE_TOLERANCE = 1e-9;
 const MAX_PART_WATTS = 5_000;
 const MAX_WALL_WATTS = 20_000;
 const WALL_PERIODS_MS = new Set([5 * MINUTE_MS, HOUR_MS]);
-/** A minute counts as fully covered when it is missing less than this. */
-const FULL_MINUTE_MS = MINUTE_MS - 1_000;
 // Persistence. The full file is rewritten at most hourly (and by flush()/close()); in
 // between, the periodic flush writes only the minutes changed since then to a small
 // "recent" file beside it, which loading merges back in. A large change set (a backfill)
@@ -58,6 +56,21 @@ function normalizeNodeIds(nodeIds) {
 
 function nodeValues(nodeIds, value, fallback = 0) {
   return Object.fromEntries(nodeIds.map((id) => [id, value?.[id] ?? fallback]));
+}
+
+/** Running wall sums for the last 24 h and 31 days, and the 24 hourly slots. */
+function emptyWallSums(nodeIds) {
+  return {
+    windows: [0, 1].map(() => ({
+      energyWh: 0,
+      filledWh: 0,
+      nodeCoverageMs: nodeValues(nodeIds),
+      fleetCoverageMs: 0,
+      coveredTokens: 0,
+      tokenFleetWh: 0,
+    })),
+    hours: Array.from({ length: 24 }, () => ({ wh: 0, coverageMs: 0 })),
+  };
 }
 
 function emptyBucket(minuteStartMs, nodeIds) {
@@ -203,6 +216,7 @@ function roundSeries(series) {
  * written without them, and the optional series are rounded to a microwatt-hour.
  */
 function serializeBucket(bucket) {
+  if (!bucket.parts && !bucket.wall) return bucket;
   const estimateEmpty =
     !bucket.fleetWattMs &&
     !bucket.fleetCoverageMs &&
@@ -210,7 +224,6 @@ function serializeBucket(bucket) {
     !bucket.coveredOutputTokens &&
     Object.values(bucket.nodeWh).every((v) => !v) &&
     Object.values(bucket.nodeCoverageMs).every((v) => !v);
-  if (!bucket.parts && !bucket.wall) return bucket;
   const { parts, wall, ...estimate } = bucket;
   const out = estimateEmpty ? { minuteStartMs: bucket.minuteStartMs } : { ...estimate };
   if (parts) out.parts = roundSeries(parts);
@@ -239,7 +252,6 @@ function restoreSeries(raw, nodeIds, valid) {
   }
   return Object.keys(out).length ? out : null;
 }
-
 
 /**
  * One observation per available LLM endpoint on a tracked head or standalone
@@ -352,6 +364,7 @@ export class FleetEnergyTracker {
     this._flushTimer = null;
     // Wall power (optional, see configureWall). Baselines and samples are in memory only.
     this._wallNodeIds = [];
+    this._wallNodeIdSet = new Set();
     this._wallSettledBefore = () => -Infinity;
     this._wallBaselines = new Map();
     this._wallHighWaterMs = null;
@@ -415,6 +428,7 @@ export class FleetEnergyTracker {
 
   _bucket(minuteStartMs, { markChanged = true } = {}) {
     if (markChanged) this._changedMinutes.add(minuteStartMs);
+    if (minuteStartMs < (this._ratioCache?.settled?.beforeMs ?? -Infinity)) this._ratioCache.settled = null;
     let bucket = this._buckets.get(minuteStartMs);
     if (!bucket) {
       bucket = emptyBucket(minuteStartMs, this.nodeIds);
@@ -501,10 +515,7 @@ export class FleetEnergyTracker {
       }
       this._wallBaselines.set(id, { atMs: timestamp, watts });
     }
-    if (integrated) {
-      this._wallHighWaterMs = Math.max(this._wallHighWaterMs ?? timestamp, timestamp);
-      this._ratioCache = null;
-    }
+    if (integrated) this._wallHighWaterMs = Math.max(this._wallHighWaterMs ?? timestamp, timestamp);
     this._latestWallFreshIds = fresh;
     // Current fleet draw: measured where a meter is fresh, estimate × ratio elsewhere.
     const ratios = this._ratios(timestamp).byNode;
@@ -533,7 +544,9 @@ export class FleetEnergyTracker {
    */
   configureWall({ nodeIds = [], settledBefore = () => Infinity } = {}) {
     this._wallNodeIds = normalizeNodeIds(nodeIds).filter((id) => this._nodeIdSet.has(id));
+    this._wallNodeIdSet = new Set(this._wallNodeIds);
     this._wallSettledBefore = typeof settledBefore === "function" ? settledBefore : () => Infinity;
+    this._ratioCache = null;
     return this._wallNodeIds;
   }
 
@@ -541,20 +554,25 @@ export class FleetEnergyTracker {
     return [...this._wallNodeIds];
   }
 
-  /** Learned wall/estimate ratios (recomputed at most once a minute, or after new meter data). */
+  /**
+   * Learned wall/estimate ratios, recomputed once a minute or when the meter's record
+   * changes. Ratios only use complete minutes, so live samples never change them. The
+   * cache also holds the wall sums of settled minutes, which depend on the ratios.
+   */
   _ratios(atMs) {
     const minute = Math.floor(atMs / MINUTE_MS);
     if (this._ratioCache?.minute !== minute) {
       this._ratioCache = {
         minute,
-        value: learnWallRatios(this._buckets.values(), this.nodeIds, new Set(this._wallNodeIds), atMs),
+        value: learnWallRatios(this._buckets.values(), this.nodeIds, this._wallNodeIdSet, atMs),
+        settled: null,
       };
     }
     return this._ratioCache.value;
   }
 
   _wallMinute(bucket, ratios) {
-    return wallMinute(bucket, this.nodeIds, new Set(this._wallNodeIds), ratios);
+    return wallMinute(bucket, this.nodeIds, this._wallNodeIdSet, ratios);
   }
 
   /** Bookkeeping the meter integration stores with this tracker (survives restarts, not a new scope). */
@@ -603,13 +621,15 @@ export class FleetEnergyTracker {
     const now = this._now();
     const cutoff = this.windowStartMs(now);
     let applied = 0;
+    let changed = 0;
     for (const period of periods) {
       const { startMs, endMs, meanW } = period ?? {};
       const durationMs = endMs - startMs;
       if (!WALL_PERIODS_MS.has(durationMs) || startMs % durationMs !== 0 || endMs > now || startMs < cutoff) continue;
       if (sinceMs !== null && startMs < sinceMs) continue;
       if (!validNonnegative(meanW) || meanW > MAX_WALL_WATTS) continue;
-      const whPerMinute = (meanW * MINUTE_MS) / 3_600_000;
+      // Rounded as on disk, so the same figure fetched again after a restart is no change.
+      const whPerMinute = roundMicro((meanW * MINUTE_MS) / 3_600_000);
       for (let minute = startMs; minute < endMs; minute += MINUTE_MS) {
         const bucket = this._bucket(minute, { markChanged: false });
         const wall = (bucket.wall ??= {});
@@ -618,10 +638,11 @@ export class FleetEnergyTracker {
         if (sameEntry(wall[nodeId], entry)) continue;
         wall[nodeId] = entry;
         this._changedMinutes.add(minute);
+        changed += 1;
       }
       applied += 1;
     }
-    if (applied > 0) {
+    if (changed > 0) {
       this._dirty = true;
       this._ratioCache = null;
     }
@@ -643,7 +664,6 @@ export class FleetEnergyTracker {
     if (imported > 0) this._dirty = true;
     return imported;
   }
-
 
   _integrateFleet(previous, current) {
     this._splitInterval(
@@ -731,7 +751,10 @@ export class FleetEnergyTracker {
       changed = true;
     }
     if (this._buckets.size === 0) this._latestBucketStart = null;
-    if (changed) this._dirty = true;
+    if (changed) {
+      this._dirty = true;
+      this._ratioCache = null;
+    }
   }
 
   _prune(atMs) {
@@ -923,48 +946,69 @@ export class FleetEnergyTracker {
     );
   }
 
-  _wallWindow(atMs, windowMs, ratios) {
-    const cutoff = alignedWindowCutoff(atMs, windowMs);
-    const nodeCoverageMs = nodeValues(this.nodeIds);
-    let energyWh = 0;
-    let filledWh = 0;
-    let fleetCoverageMs = 0;
-    let coveredTokens = 0;
-    let tokenFleetWh = 0;
-    for (const bucket of this._buckets.values()) {
-      if (bucket.minuteStartMs < cutoff || bucket.minuteStartMs > atMs) continue;
-      const minute = this._wallMinute(bucket, ratios);
-      if (!minute) continue;
-      for (const id of this.nodeIds) {
-        const n = minute.nodes[id];
-        energyWh += n.wh + n.filledWh;
-        filledWh += n.filledWh;
-        nodeCoverageMs[id] += n.coverageMs + n.filledMs;
+  /**
+   * Wall power over the last 24 h and 31 days, and the 24 hourly averages. Minutes that
+   * live samples can no longer reach are summed once and kept with the ratios they used,
+   * until the minute turns, the ratios change or one of those minutes is written again;
+   * only the newest minutes are added up on every call.
+   */
+  _wallWindows(atMs, ratios) {
+    const minute = Math.floor(atMs / MINUTE_MS) * MINUTE_MS;
+    const frame = {
+      cutoffs: [alignedWindowCutoff(atMs, DAY_MS), alignedWindowCutoff(atMs, RETENTION_MS)],
+      graphStart: minute - DAY_MS,
+      graphEnd: minute,
+      tokensSince: this._tokensTrackedSinceMs,
+    };
+    // A sample integrates back MAX_GAP_MS at most, so earlier minutes are final; _bucket()
+    // drops the cached sums should anything write to one of them all the same.
+    const latest = Math.max(this._latestRecordAt ?? atMs, atMs);
+    const settledBefore = Math.min(minute, Math.floor((latest - MAX_GAP_MS) / MINUTE_MS) * MINUTE_MS);
+    const cache = this._ratioCache?.value.byNode === ratios ? this._ratioCache : null;
+    let settled = cache?.settled;
+    if (!settled || settled.minute !== minute || settled.beforeMs !== settledBefore || settled.tokensSince !== frame.tokensSince) {
+      const sums = emptyWallSums(this.nodeIds);
+      for (const bucket of this._buckets.values()) {
+        if (bucket.minuteStartMs < settledBefore) this._addWallMinute(sums, bucket, ratios, frame, atMs);
       }
-      if (!minute.fleet) continue;
-      fleetCoverageMs += minute.fleet.coverageMs;
-      if (minute.fleet.full && this._tokensTrackedSinceMs !== null && bucket.minuteStartMs >= this._tokensTrackedSinceMs) {
-        coveredTokens += bucket.outputTokens;
-        tokenFleetWh += minute.fleet.wh;
-      }
+      settled = { minute, beforeMs: settledBefore, tokensSince: frame.tokensSince, sums };
+      if (cache) cache.settled = settled;
     }
-    const observed = Object.values(nodeCoverageMs).some((ms) => ms > 0);
-    return { energyWh, filledWh, observed, nodeCoverageMs, fleetCoverageMs, coveredTokens, tokenFleetWh };
+    const sums = structuredClone(settled.sums);
+    for (let start = Math.max(settledBefore, frame.cutoffs[1]); start <= atMs; start += MINUTE_MS) {
+      const bucket = this._buckets.get(start);
+      if (bucket) this._addWallMinute(sums, bucket, ratios, frame, atMs);
+    }
+    const [last24h, last31d] = sums.windows.map((w) => ({ ...w, observed: Object.values(w.nodeCoverageMs).some((ms) => ms > 0) }));
+    const hourly = sums.hours.map(({ wh, coverageMs }) => (coverageMs > 0 ? (wh * 3_600_000) / coverageMs : null));
+    return { last24h, last31d, hourly };
   }
 
-  _wallHourly(atMs, ratios) {
-    const graphEnd = Math.floor(atMs / MINUTE_MS) * MINUTE_MS;
-    const graphStart = graphEnd - DAY_MS;
-    const aggregates = Array.from({ length: 24 }, () => ({ wh: 0, coverageMs: 0 }));
-    for (const bucket of this._buckets.values()) {
-      if (bucket.minuteStartMs < graphStart || bucket.minuteStartMs >= graphEnd) continue;
-      const fleet = this._wallMinute(bucket, ratios)?.fleet;
-      if (!fleet) continue;
-      const slot = aggregates[Math.floor((bucket.minuteStartMs - graphStart) / HOUR_MS)];
-      slot.wh += fleet.wh;
-      slot.coverageMs += fleet.coverageMs;
+  _addWallMinute(sums, bucket, ratios, { cutoffs, graphStart, graphEnd, tokensSince }, atMs) {
+    const start = bucket.minuteStartMs;
+    if (start < cutoffs[1] || start > atMs) return;
+    const minute = this._wallMinute(bucket, ratios);
+    if (!minute) return;
+    sums.windows.forEach((w, i) => {
+      if (start < cutoffs[i]) return;
+      for (const id of this.nodeIds) {
+        const n = minute.nodes[id];
+        w.energyWh += n.wh + n.filledWh;
+        w.filledWh += n.filledWh;
+        w.nodeCoverageMs[id] += n.coverageMs + n.filledMs;
+      }
+      if (!minute.fleet) return;
+      w.fleetCoverageMs += minute.fleet.coverageMs;
+      if (minute.fleet.full && tokensSince !== null && start >= tokensSince) {
+        w.coveredTokens += bucket.outputTokens;
+        w.tokenFleetWh += minute.fleet.wh;
+      }
+    });
+    if (minute.fleet && start >= graphStart && start < graphEnd) {
+      const slot = sums.hours[Math.floor((start - graphStart) / HOUR_MS)];
+      slot.wh += minute.fleet.wh;
+      slot.coverageMs += minute.fleet.coverageMs;
     }
-    return aggregates.map(({ wh, coverageMs }) => (coverageMs > 0 ? (wh * 3_600_000) / coverageMs : null));
   }
 
   /**
@@ -974,8 +1018,7 @@ export class FleetEnergyTracker {
    */
   _wallSnapshot(atMs) {
     const learned = this._ratios(atMs);
-    const last24h = this._wallWindow(atMs, DAY_MS, learned.byNode);
-    const last31d = this._wallWindow(atMs, RETENTION_MS, learned.byNode);
+    const { last24h, last31d, hourly } = this._wallWindows(atMs, learned.byNode);
     const recent = this._latestRecordAt !== null && atMs - this._latestRecordAt <= MAX_GAP_MS;
     const fresh = recent ? this._latestWallFreshIds : [];
     const filled = recent ? this._latestWallFilledIds : [];
@@ -1001,7 +1044,7 @@ export class FleetEnergyTracker {
       coverage31dWindowMs: RETENTION_MS,
       nodeCoverage24hMs: last24h.nodeCoverageMs,
       nodeCoverage31dMs: last31d.nodeCoverageMs,
-      hourlyWatts24h: this._wallHourly(atMs, learned.byNode),
+      hourlyWatts24h: hourly,
     };
   }
 
@@ -1296,10 +1339,6 @@ export class FleetEnergyTracker {
     if (!this.filePath) return;
     try {
       const raw = this._mergeRecent(JSON.parse(this._fs.readFileSync(this.filePath, "utf8")));
-      if (Number.isFinite(raw?.savedAt)) {
-        this._baseSavedAt = raw.savedAt;
-        this._lastFullWriteAt = raw.savedAt;
-      }
       const legacyNodeIds = !Object.prototype.hasOwnProperty.call(raw || {}, "nodeIds");
       if (raw?.version !== FILE_VERSION || !Array.isArray(raw.buckets)) {
         return;
@@ -1393,6 +1432,13 @@ export class FleetEnergyTracker {
         }
       }
       this._dirty = legacyNodeIds || rejectedBucket || repairedHighWater;
+      // Recent-only writes build on this file, unless loading had to repair it. A rejected or
+      // archived file never becomes the base: the first write after it is a full one.
+      if (this._dirty) this._fullWriteNeeded = true;
+      else if (Number.isFinite(raw.savedAt)) {
+        this._baseSavedAt = raw.savedAt;
+        this._lastFullWriteAt = raw.savedAt;
+      }
       if (Number.isFinite(now)) this._prune(now);
     } catch (error) {
       if (error?.code === "ENOENT") return;
@@ -1408,6 +1454,7 @@ export class FleetEnergyTracker {
   clear({ olderThanMs } = {}) {
     // Archive finished minutes first: a reset only empties the 31-day window.
     this._foldClosedMinutes(this._now());
+    this._ratioCache = null;
     const all = !(Number.isFinite(olderThanMs) && olderThanMs > 0);
     const cutoff = all ? Infinity : this._now() - olderThanMs;
     let removed = 0;

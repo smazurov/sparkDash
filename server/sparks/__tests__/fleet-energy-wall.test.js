@@ -9,6 +9,7 @@ import path from "node:path";
 import { FleetEnergyTracker, estimateNodeParts, estimateNodeWatts } from "../../energy/FleetEnergyTracker.js";
 import { MonthlyEnergyArchive } from "../../energy/FleetEnergyMonthly.js";
 import { runFleetEnergySamplerTick } from "../../energy/FleetEnergyRuntime.js";
+import { wallMinute } from "../../energy/wallMinute.js";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -339,4 +340,86 @@ test("the tracker imports only history older than its window", () => {
     ])
   );
   assert.equal(imported, 2);
+});
+
+// ─── Cached sums ────────────────────────────────────────────────────────
+
+/** The wall windows computed plainly, minute by minute, as a reference for the cached ones. */
+function plainWallWindows(tracker, atMs) {
+  const ratios = tracker._ratios(atMs).byNode;
+  const metered = new Set(tracker.wallNodeIds);
+  const minuteStart = Math.floor(atMs / MINUTE) * MINUTE;
+  const cutoff = (windowMs) => Math.floor((atMs - windowMs) / MINUTE) * MINUTE;
+  const sum = (windowMs) => {
+    let energyWh = 0;
+    let fleetCoverageMs = 0;
+    for (const bucket of tracker._buckets.values()) {
+      if (bucket.minuteStartMs < cutoff(windowMs) || bucket.minuteStartMs > atMs) continue;
+      const minute = wallMinute(bucket, tracker.nodeIds, metered, ratios);
+      if (!minute) continue;
+      for (const id of tracker.nodeIds) energyWh += minute.nodes[id].wh + minute.nodes[id].filledWh;
+      fleetCoverageMs += minute.fleet?.coverageMs ?? 0;
+    }
+    return { energyWh, fleetCoverageMs };
+  };
+  const hours = Array.from({ length: 24 }, () => ({ wh: 0, ms: 0 }));
+  for (const bucket of tracker._buckets.values()) {
+    const start = bucket.minuteStartMs;
+    if (start < minuteStart - DAY || start >= minuteStart) continue;
+    const fleet = wallMinute(bucket, tracker.nodeIds, metered, ratios)?.fleet;
+    if (!fleet) continue;
+    const slot = hours[Math.floor((start - (minuteStart - DAY)) / HOUR)];
+    slot.wh += fleet.wh;
+    slot.ms += fleet.coverageMs;
+  }
+  return { last24h: sum(DAY), last31d: sum(31 * DAY), hourly: hours.map((h) => (h.ms > 0 ? (h.wh * 3_600_000) / h.ms : null)) };
+}
+
+test("cached wall sums always equal a plain recount, through samples, meter records, resets and clock steps", () => {
+  const { tracker, setNow } = makeTracker({ now: T0 - 3 * HOUR });
+  tracker.configureWall({ nodeIds: ["a", "b"] });
+  let at = T0 - 3 * HOUR;
+  let checks = 0;
+  const check = (label, when = at) => {
+    const wall = tracker.snapshot(when).wall;
+    const plain = plainWallWindows(tracker, when);
+    close(wall.energy24hKwh ?? 0, plain.last24h.energyWh / 1000, 1e-9);
+    close(wall.energy31dKwh ?? 0, plain.last31d.energyWh / 1000, 1e-9);
+    assert.equal(wall.coverage24hMs, plain.last24h.fleetCoverageMs, label);
+    wall.hourlyWatts24h.forEach((w, i) => (w === null ? assert.equal(plain.hourly[i], null, label) : close(w, plain.hourly[i], 1e-9)));
+    checks += 1;
+  };
+  // b's draw changes every hour against a steady estimate, so filling its minutes from the
+  // estimate gives other hourly figures than its meter did.
+  const step = (seconds, wallA, wallB) => {
+    at += seconds * 1000;
+    setNow(at);
+    tracker.record([snap("a", { wallWatts: wallA }), snap("b", { gpu: 30, wallWatts: wallB })], at);
+  };
+  const live = (i) => step(2, 120 + (i % 7), i > 2000 && i < 2600 ? null : 100 + 25 * Math.floor(i / 1800));
+  // Each change is made right after a snapshot filled the cache, and checked in the same minute.
+  const around = (label, change) => {
+    check(`before ${label}`);
+    change();
+    check(`after ${label}`);
+  };
+  // Three hours of live samples; b's meter drops out for twenty minutes.
+  for (let i = 0; i < 5400; i += 1) {
+    if (i % 97 === 0) around(`sample ${i}`, () => live(i));
+    else live(i);
+  }
+  around("a meter record well inside the cached minutes", () =>
+    tracker.applyWallPeriods("a", [{ startMs: T0 - 2 * HOUR, endMs: T0 - 2 * HOUR + 5 * MINUTE, meanW: 300 }])
+  );
+  around("clearWall", () => tracker.clearWall("b"));
+  around("a partial reset", () => tracker.clear({ olderThanMs: HOUR }));
+  // The clock steps back five minutes, and samples write into minutes counted before.
+  at -= 5 * MINUTE;
+  for (let i = 0; i < 60; i += 1) around(`a sample after the clock stepped back (${i})`, () => step(2, 500, 500));
+  // Writers go through _bucket(); a write to a minute already counted drops the sums,
+  // whichever writer it is (samples cannot reach one today, see _wallWindows).
+  around("a write to a counted minute", () => {
+    tracker._bucket(Math.floor(at / MINUTE) * MINUTE - 30 * MINUTE).wall.a[0] += 1;
+  });
+  assert.ok(checks > 100);
 });

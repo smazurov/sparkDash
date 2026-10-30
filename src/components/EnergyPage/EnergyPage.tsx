@@ -157,8 +157,8 @@ export function EnergyPage({
   const model = useMemo(() => {
     if (!history || history.membershipChanged) return null;
     const nodeIds = history.nodeIds;
-    // With meters configured every headline figure is wall power (measured, gaps filled
-    // from the estimate); the estimate and its GPU/CPU parts are drawn beside it.
+    // With meters configured every figure is wall power (measured, gaps filled from the
+    // estimate), with the GPU and CPU parts drawn over it; the raw estimate is not shown.
     const rows = hasWall(history) ? wallRows(history.hourly, nodeIds) : history.hourly;
     const win = rangeWindow(range, history.generatedAt, rows);
     const inRange = rowsInRange(rows, win.startMs, win.endHourMs);

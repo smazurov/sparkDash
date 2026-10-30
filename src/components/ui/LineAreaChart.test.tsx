@@ -23,13 +23,13 @@ describe("LineAreaChart overlays", () => {
         ariaLabel="power"
         overlays={[
           { id: "gpu", label: "GPU", color: "red", values: [40, 60, 300] },
-          { id: "est", label: "Estimate", color: "grey", values: [80, null, 90], dashed: true },
+          { id: "cpu", label: "CPU", color: "grey", values: [80, null, 90] },
         ]}
       />
     );
     const paths = [...container.querySelectorAll("path")];
     expect(paths.filter((p) => p.getAttribute("stroke") === "red")).toHaveLength(1);
-    // The estimate has a gap in the middle: two lone points, no path.
+    // The CPU line has a gap in the middle: two lone points, no path.
     expect(paths.filter((p) => p.getAttribute("stroke") === "grey")).toHaveLength(0);
     expect(container.querySelectorAll('circle[fill="grey"]')).toHaveLength(2);
     // The axis grows to fit the 300 W overlay point.
@@ -42,6 +42,6 @@ describe("LineAreaChart overlays", () => {
     });
     const tip = container.querySelector(".chart__tip")!;
     expect(tip.textContent).toContain("GPU: 60 W");
-    expect(tip.textContent).toContain("Estimate: —");
+    expect(tip.textContent).toContain("CPU: —");
   });
 });

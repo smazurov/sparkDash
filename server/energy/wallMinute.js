@@ -27,36 +27,44 @@ const FULL_MINUTE_MS = MINUTE_MS - 1_000;
  * @param {Map<string, number> | null} ratios  node → wall/estimate ratio (absent = no fill)
  */
 export function wallMinute(bucket, nodeIds, wallNodeIds, ratios) {
+  // Plain loops: this runs for every stored minute (44k of them) on each snapshot.
+  const count = nodeIds.length;
+  const wall = bucket?.wall;
+  const estimateCoverage = bucket?.nodeCoverageMs;
+  const estimateEnergy = bucket?.nodeWh;
   const nodes = {};
+  const covered = new Array(count);
   let any = false;
-  for (const id of nodeIds) {
-    const measured = wallNodeIds.has(id) ? bucket?.wall?.[id] : null;
-    const wh = measured?.[0] ?? 0;
-    const coverageMs = measured?.[1] ?? 0;
-    const meteredMs = measured?.[2] ?? 0;
-    const estimateMs = bucket?.nodeCoverageMs?.[id] ?? 0;
-    const estimateWh = bucket?.nodeWh?.[id] ?? 0;
-    const ratio = ratios?.get(id);
+  let common = MINUTE_MS;
+  for (let i = 0; i < count; i++) {
+    const id = nodeIds[i];
+    const measured = wall && wallNodeIds.has(id) ? wall[id] : null;
+    const wh = measured ? measured[0] : 0;
+    const coverageMs = measured ? measured[1] : 0;
+    const meteredMs = measured ? measured[2] : 0;
+    const estimateMs = estimateCoverage?.[id] ?? 0;
     let filledWh = 0;
     let filledMs = 0;
-    if (Number.isFinite(ratio) && estimateMs > coverageMs) {
+    const ratio = estimateMs > coverageMs ? ratios?.get(id) : undefined;
+    if (Number.isFinite(ratio)) {
       filledMs = Math.min(MINUTE_MS - coverageMs, estimateMs - coverageMs);
-      filledWh = (estimateWh / estimateMs) * filledMs * ratio;
+      filledWh = ((estimateEnergy?.[id] ?? 0) / estimateMs) * filledMs * ratio;
     }
     if (coverageMs > 0 || filledMs > 0) any = true;
+    covered[i] = Math.min(MINUTE_MS, coverageMs + filledMs);
+    if (covered[i] < common) common = covered[i];
     nodes[id] = { wh, coverageMs, meteredMs, filledWh, filledMs };
   }
   if (!any) return null;
   let fleet = null;
-  const covered = nodeIds.map((id) => Math.min(MINUTE_MS, nodes[id].coverageMs + nodes[id].filledMs));
-  if (nodeIds.length > 0 && covered.every((ms) => ms > 0)) {
-    const common = Math.min(...covered);
+  if (count > 0 && common > 0) {
     let wh = 0;
     let filledWh = 0;
-    nodeIds.forEach((id, i) => {
-      wh += ((nodes[id].wh + nodes[id].filledWh) * common) / covered[i];
-      filledWh += (nodes[id].filledWh * common) / covered[i];
-    });
+    for (let i = 0; i < count; i++) {
+      const n = nodes[nodeIds[i]];
+      wh += ((n.wh + n.filledWh) * common) / covered[i];
+      filledWh += (n.filledWh * common) / covered[i];
+    }
     fleet = { coverageMs: common, wh, filledWh, full: common >= FULL_MINUTE_MS };
   }
   return { nodes, fleet };

@@ -17,7 +17,6 @@ export interface LineOverlay {
   label: string;
   color: string;
   values: ReadonlyArray<number | null>;
-  dashed?: boolean;
 }
 
 interface LineAreaChartProps {
@@ -116,7 +115,6 @@ export function LineAreaChart({
                 stroke={o.color}
                 strokeWidth="1.5"
                 strokeLinejoin="round"
-                strokeDasharray={o.dashed ? "4 3" : undefined}
               />
             ) : (
               <circle key={`${o.id}-${k}`} cx={x(run[0].i)} cy={y(run[0].v)} r="2" fill={o.color} />

@@ -36,14 +36,14 @@ Create `config/power-meters.json`, or point `POWER_METERS_CONFIG_PATH` at the fi
     }
   },
   "units": {
-    "spark-6bb0": {
+    "spark-a": {
       "meter": "ha",
-      "channel": "sensor.living_room_power_strip_power_3",
+      "channel": "sensor.power_strip_outlet_3_power",
       "since": "2026-08-13T00:00:00Z"
     },
-    "spark-4d48": {
+    "spark-b": {
       "meter": "ha",
-      "channel": "sensor.living_room_power_strip_power_4",
+      "channel": "sensor.power_strip_outlet_4_power",
       "since": "2026-08-13T00:00:00Z"
     }
   }

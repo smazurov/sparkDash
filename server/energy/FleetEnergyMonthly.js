@@ -37,8 +37,6 @@ const MAX_AHEAD_MS = 24 * 60 * 60_000;
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
 const HOUR_MS = 60 * MINUTE_MS;
-/** A minute or hour counts as fully covered when it is missing less than this share. */
-const FULL_COVERAGE = 59 / 60;
 
 const num = (v) => (Number.isFinite(v) && v >= 0 ? v : 0);
 const round3 = (v) => Math.round(v * 1000) / 1000;
