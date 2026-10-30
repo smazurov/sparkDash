@@ -31,7 +31,7 @@ export const HISTORY_PERIODS = Object.freeze(["5minute", "hour"]);
  * A unit is attached to one *channel* of a meter: a provider-specific string naming one
  * outlet's power reading (a Home Assistant entity id, a Shelly switch id, a PDU outlet).
  *
- * Required: `static type`, `readPower`. Meters that keep their own record also list
+ * Required: `static type`, `static label`, `readPower`. Meters that keep their own record also list
  * `static historyPeriods` and implement `readHistory`; `assertProviderClass` enforces that.
  *
  * @abstract
@@ -39,6 +39,9 @@ export const HISTORY_PERIODS = Object.freeze(["5minute", "hour"]);
 export class PowerMeterProvider {
   /** Provider name used as `type` in power-meters.json. */
   static type = "";
+
+  /** Name shown to people: on the Energy page, in the Activity log. */
+  static label = "";
 
   /** Periods `readHistory` can return; empty for a live-only meter. @type {ReadonlyArray<"5minute" | "hour">} */
   static historyPeriods = Object.freeze([]);
@@ -73,6 +76,10 @@ export class PowerMeterProvider {
 
   get type() {
     return /** @type {typeof PowerMeterProvider} */ (this.constructor).type;
+  }
+
+  get label() {
+    return /** @type {typeof PowerMeterProvider} */ (this.constructor).label;
   }
 
   get historyPeriods() {
@@ -132,6 +139,9 @@ export function assertProviderClass(Provider) {
   }
   if (typeof Provider.type !== "string" || !/^[a-z][a-z0-9-]*$/.test(Provider.type)) {
     throw new TypeError(`${name}.type must be a lowercase provider name`);
+  }
+  if (typeof Provider.label !== "string" || Provider.label.trim() === "") {
+    throw new TypeError(`${name}.label must name the meter for people`);
   }
   if (Provider.prototype.readPower === PowerMeterProvider.prototype.readPower) {
     throw new TypeError(`${name} must implement readPower`);

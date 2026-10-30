@@ -29,6 +29,7 @@ function okConfig(overrides = {}) {
 /** A scriptable meter that keeps history, built on the real interface. */
 class FakeStrip extends PowerMeterProvider {
   static type = "fake";
+  static label = "Fake strip";
   static historyPeriods = Object.freeze(["5minute", "hour"]);
   readings = new Map();
   history = { "5minute": new Map(), hour: new Map() };
@@ -49,6 +50,7 @@ class FakeStrip extends PowerMeterProvider {
 
 class LivePlug extends PowerMeterProvider {
   static type = "plug";
+  static label = "Live plug";
   async readPower(channels) {
     return new Map(channels.map((c) => [c, { watts: 10, atMs: T0 }]));
   }
@@ -147,8 +149,11 @@ test("health changes are announced in the activity log and exported", async () =
       ["power-meter.recovered", "success"],
     ]
   );
-  assert.match(events[0].message, /Home Assistant power meter "strip" \(fake:\/\/strip\) connected: 2 units reporting wall power/);
-  assert.match(events[1].message, /spark-b: entity is unavailable/);
+  // The name comes from the provider that is running, not from the configured type.
+  assert.equal(events[0].message, "Fake strip connected: 2 outlets");
+  assert.equal(events[1].message, "Fake strip stopped reading: spark-b: entity is unavailable");
+  assert.equal(events[2].message, "Fake strip is reading again");
+  assert.equal(runtime.status().meters[0].label, "Fake strip");
   const metrics = runtime.renderPrometheus();
   assert.match(metrics, /sparkdash_power_meter_up\{meter="strip",type="homeassistant"\} 1\n/);
   assert.match(metrics, /sparkdash_wall_power_watts\{unit="spark-a",meter="strip"\} 50\n/);
@@ -222,6 +227,7 @@ test("a meter that cannot start marks its units without stopping the runtime", a
   await runtime.reconcileOnce();
   const status = runtime.status();
   assert.equal(status.meters[0].health, "unavailable");
+  assert.equal(status.meters[0].label, "Home Assistant", "a meter that could not start is still named by its provider");
   assert.match(status.meters[0].error, /HOME_ASSISTANT_TOKEN/);
   assert.equal(status.units[0].error, "environment variable HOME_ASSISTANT_TOKEN is not set");
   assert.deepEqual([...runtime.wallReadings()], []);

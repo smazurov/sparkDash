@@ -71,7 +71,6 @@ export function MonthlyEnergy({
 
   const now = data?.generatedAt ?? 0;
   // A month with wall power (measured, gaps filled) is shown at the wall; others stay estimated.
-  const raw = useMemo(() => new Map((data?.months ?? []).map((m) => [m.month, m])), [data]);
   const months = useMemo(() => (data?.months ?? []).map((m) => wallMonth(m) ?? m), [data]);
   const monthKeys = useMemo(() => monthOptions(months, now), [months, now]);
   const years = useMemo(() => yearOptions(months, now), [months, now]);
@@ -126,7 +125,6 @@ export function MonthlyEnergy({
           colorOf={colorOf}
           price={price}
           currency={currency}
-          estimate={raw.get(activeMonth) ?? null}
         />
       ) : (
         <YearView months={months} year={activeYear} nameOf={nameOf} colorOf={colorOf} price={price} currency={currency} />
@@ -143,8 +141,7 @@ function MonthView({
   colorOf,
   price,
   currency,
-  estimate = null,
-}: ViewProps & { month: MonthlyEnergyMonth | null; label: string; now: number; estimate?: MonthlyEnergyMonth | null }) {
+}: ViewProps & { month: MonthlyEnergyMonth | null; label: string; now: number }) {
   const metered = month?.totalWallWh != null;
   if (!month || month.totalWh <= 0) {
     return <p className="en-panel__sub" role="status">No energy was recorded in {label}.</p>;
@@ -163,12 +160,6 @@ function MonthView({
           <b className="mono">{eff != null ? `${eff < 10 ? eff.toFixed(2) : eff.toFixed(1)} Wh / 1k tok` : "—"}</b>
         </div>
         <div><span className="eyebrow">Fleet coverage</span><b className="mono">{pct(fleetCoverage(month, now))}</b></div>
-        {metered ? (
-          <div>
-            <span className="eyebrow">Estimate</span>
-            <b className="mono">{estimate && estimate.totalWh > 0 ? `${formatKwh(estimate.totalWh / 1000)} kWh` : "—"}</b>
-          </div>
-        ) : null}
         <div>
           <span className="eyebrow">Status</span>
           <Tag tone={month.closed ? "good" : "warn"}>{month.closed ? "Closed" : "Open, still counting"}</Tag>
@@ -206,7 +197,7 @@ function MonthView({
         Only the Sparks that reported in {label} are listed. Coverage is the share of the month each one was measured
         {month.closed ? "" : " so far"}.{" "}
         {metered
-          ? `Measured at the wall${(month.totalWallFilledWh ?? 0) > 0 ? `; ${pct((month.totalWallFilledWh ?? 0) / month.totalWh)} filled from the estimate where no meter read` : ""}.`
+          ? `Measured at the wall${(month.totalWallFilledWh ?? 0) > 0 ? `, ${pct((month.totalWallFilledWh ?? 0) / month.totalWh)} filled from the estimate` : ""}.`
           : "Estimated, not metered."}
       </p>
     </>

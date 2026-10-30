@@ -128,6 +128,7 @@ const status: PowerMeterStatus = {
     {
       id: "ha",
       type: "homeassistant",
+      label: "Home Assistant",
       target: "https://homeassistant.lan",
       health: "ok",
       ok: true,
@@ -167,40 +168,77 @@ describe("Energy page", () => {
     expect([...container.querySelectorAll("th")].map((th) => th.textContent)).not.toContain("GPU");
   });
 
-  it("shows wall power as the headline with the estimate, GPU and CPU beside it, and says the meter works", async () => {
+  it("shows wall power with GPU and CPU beside it, drops the raw estimate, and says the meter works", async () => {
     vi.mocked(fetchPowerMeterStatus).mockResolvedValue(status);
     vi.mocked(fetchFleetEnergy).mockResolvedValue(live(wall));
     vi.mocked(fetchEnergyHistory).mockResolvedValue(history(true));
     const { container } = render(<EnergyPage sparks={sparks} settings={null} />);
     await settle();
     const text = container.textContent ?? "";
-    expect(text).toContain("measured at the wall by Home Assistant");
-    expect(text).toContain("Measured at the wall.");
-    // One dashboard: no source switch.
+    expect(text).toContain("Measured at the wall by Home Assistant.");
+    // One dashboard: no source switch, no explanatory banner, no warning.
     expect(container.querySelector('[aria-label="Energy source"]')).toBeNull();
-    // HA is configured and working, and says what it reads.
-    const meters = container.querySelector(".en-meters")!;
-    expect(meters.textContent).toContain("Connected");
-    expect(meters.textContent).toContain("Home Assistant");
-    expect(meters.textContent).toContain("https://homeassistant.lan");
-    expect(meters.textContent).toContain("every 10 s");
-    expect(meters.textContent).toContain("meter record through");
-    expect(meters.textContent).toContain("Dan 55 W");
-    expect(meters.textContent).toContain("Stepan no meter, estimated at 141%");
-    // Headline is wall: 111 W now, with the estimate and live parts underneath.
-    expect(text).toContain("Current draw at the wall");
+    expect(container.querySelector(".en-banner")).toBeNull();
+    // HA is configured and working: a green chip, details on hover.
+    const chip = container.querySelector(".en-meter-chip")!;
+    expect(chip.textContent).toBe("Home Assistant");
+    expect(chip.className).toContain("tag--good");
+    expect(chip.getAttribute("title")).toMatch(/^https:\/\/homeassistant\.lan · every 10 s · record through .+ · Dan 55 W$/);
+    // Headline is wall: 111 W now, live GPU and CPU on one line under it; the raw
+    // estimate (80 W, below the wall) is not shown once the wall is measured.
+    expect(text).toContain("Current draw");
     expect(text).toContain("111W");
-    expect(text).toContain("estimate 80 W");
-    expect(text).toContain("GPU 23 W · CPU 11 W");
-    expect(text).toContain("50% of this range");
-    // The power chart carries the estimate and its parts as lines.
-    expect(text).toContain("Estimate (GPU + CPU + 23 W)");
-    expect(text).toContain("GPU (measured)");
-    expect(text).toContain("CPU (modelled)");
-    // The table adds the estimate and its parts per node.
+    expect(text).toContain("GPU 23 · CPU 11 W");
+    expect(text).not.toContain("80 W");
+    expect(text).toContain("50% filled");
+    // The power chart draws GPU and CPU over wall power, and no estimate line.
+    const legend = [...container.querySelectorAll('[aria-label="Lines"] span')].map((x) => x.textContent);
+    expect(legend).toEqual(["Wall", "GPU", "CPU"]);
+    // The table adds GPU and CPU per node, not the estimate.
     const headers = [...container.querySelectorAll("th")].map((th) => th.textContent);
-    expect(headers).toEqual(expect.arrayContaining(["Estimate", "GPU", "CPU"]));
+    expect(headers).toEqual(expect.arrayContaining(["GPU", "CPU"]));
+    expect(headers).not.toContain("Estimate");
     expect(text).toContain("Dan 140%, Stepan 141%");
+  });
+
+  it("names meters the way their provider does", async () => {
+    const other = { ...status, meters: [{ ...(status.enabled ? status.meters[0] : ({} as never)), type: "shelly", label: "Shelly Pro 4PM" }] } as PowerMeterStatus;
+    vi.mocked(fetchPowerMeterStatus).mockResolvedValue(other);
+    vi.mocked(fetchFleetEnergy).mockResolvedValue(live(wall));
+    vi.mocked(fetchEnergyHistory).mockResolvedValue(history(true));
+    const { container } = render(<EnergyPage sparks={sparks} settings={null} />);
+    await settle();
+    expect(container.textContent).toContain("Measured at the wall by Shelly Pro 4PM.");
+    expect(container.querySelector(".en-meter-chip")?.textContent).toBe("Shelly Pro 4PM");
+    expect(container.textContent).not.toContain("Home Assistant");
+  });
+
+  it("falls back to the meter type when an older server sends no label", async () => {
+    const older = { ...status, meters: [{ ...(status.enabled ? status.meters[0] : ({} as never)), label: undefined }] } as unknown as PowerMeterStatus;
+    vi.mocked(fetchPowerMeterStatus).mockResolvedValue(older);
+    vi.mocked(fetchFleetEnergy).mockResolvedValue(live(wall));
+    vi.mocked(fetchEnergyHistory).mockResolvedValue(history(true));
+    const { container } = render(<EnergyPage sparks={sparks} settings={null} />);
+    await settle();
+    expect(container.textContent).toContain("Measured at the wall by homeassistant.");
+    expect(container.querySelector(".en-meter-chip")?.textContent).toBe("homeassistant");
+  });
+
+  it("warns, and turns the chip red, when the meter stops reading", async () => {
+    const broken: PowerMeterStatus = {
+      ...status,
+      meters: [{ ...(status.enabled ? status.meters[0] : ({} as never)), health: "error", ok: false, error: "spark-a: entity is unavailable" }],
+    } as PowerMeterStatus;
+    vi.mocked(fetchPowerMeterStatus).mockResolvedValue(broken);
+    vi.mocked(fetchFleetEnergy).mockResolvedValue(live(wall));
+    vi.mocked(fetchEnergyHistory).mockResolvedValue(history(true));
+    const { container } = render(<EnergyPage sparks={sparks} settings={null} />);
+    await settle();
+    expect(container.querySelector(".en-meter-chip")?.textContent).toBe("Home Assistant · not reading");
+    expect(container.querySelector(".en-meter-chip")?.className).toContain("tag--bad");
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "Home Assistant: spark-a: entity is unavailable. Missing readings are filled from the estimate."
+    );
   });
 
   it("reports a broken config instead of silently showing the estimate", async () => {
@@ -209,13 +247,13 @@ describe("Energy page", () => {
     vi.mocked(fetchEnergyHistory).mockResolvedValue(history(false));
     const { container } = render(<EnergyPage sparks={sparks} settings={null} />);
     await settle();
-    expect(container.textContent).toContain("Power meters are off:");
+    expect(container.textContent).toContain("Power meters off:");
     expect(container.textContent).toContain("must be a Home Assistant entity id");
   });
 });
 
 describe("Monthly history with wall power", () => {
-  it("shows a metered month at the wall, with its estimate and filled share", async () => {
+  it("shows a metered month at the wall, with its filled share and no raw estimate", async () => {
     const start = Date.UTC(2026, 9, 1);
     vi.mocked(fetchMonthlyEnergy).mockResolvedValue(
       monthly([
@@ -242,18 +280,19 @@ describe("Monthly history with wall power", () => {
     const { container } = render(<MonthlyEnergy nameOf={(id) => id} price={null} currency="$" />);
     await settle();
     expect(container.textContent).toContain("50.0 kWh");
-    expect(container.textContent).toContain("Estimate40.0 kWh");
-    expect(container.textContent).toContain("Measured at the wall; 10.0% filled from the estimate");
+    expect(container.textContent).not.toContain("Estimate");
+    expect(container.textContent).toContain("Measured at the wall, 10.0% filled from the estimate.");
   });
 });
 
 describe("Overview energy card with wall power", () => {
-  it("shows wall figures and keeps the estimate in view", async () => {
+  it("shows wall figures only", async () => {
     vi.mocked(fetchFleetEnergy).mockResolvedValue(live(wall));
     const { container } = render(<FleetEnergyCard nodeCount={2} />);
     await settle();
     expect(container.textContent).toContain("2.90kWh / 24 h");
-    expect(container.textContent).toContain("Measured at the wall · estimate 1.90 kWh");
+    expect(container.textContent).toContain("Wall-metered · 24h coverage 100.0%");
+    expect(container.textContent).not.toContain("1.90");
     expect(container.textContent).toContain("111 W");
     expect(container.textContent).toContain("2/2 fresh");
   });

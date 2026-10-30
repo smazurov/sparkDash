@@ -14,10 +14,10 @@ This is opt-in, and it extends the existing energy accounting instead of adding 
 - **One store.** Wall power is recorded by the fleet-energy tracker in the same minute buckets
   and monthly archive as the estimate, as additional fields. The estimate's own fields, files
   and API fields are unchanged.
-- **One dashboard.** With meters configured the Energy page's headline figures (energy, cost,
-  efficiency, the energy bars) are wall power. The power chart draws the estimate and its GPU
-  and CPU parts over it, and the By-node table adds them as columns. A status panel shows
-  whether each meter is connected and how far its own record reaches.
+- **One dashboard.** With meters configured the Energy page's figures (energy, cost,
+  efficiency, the charts) are wall power, with GPU (measured) and CPU (modelled) drawn over it
+  and added to the By-node table. The raw estimate is not shown once the wall is measured: it
+  reads below the wall, and only serves to fill gaps, scaled.
 - **Meters are providers.** A provider reads one kind of meter. Home Assistant is the first,
   which already covers most smart plugs and strips (Matter, Zigbee, Wi-Fi) and many PDUs
   through their HA integrations. See [Adding a provider](#adding-a-provider).
@@ -121,9 +121,9 @@ was covered.
 
 ## Is it working?
 
-- **The Energy page** shows a panel per meter: *Connected*, *Not reading* or *Unavailable*, the
-  meter's address, the poll interval, how far the meter's own record reaches, each unit's
-  current reading, and the ratio used for any unit without one.
+- **The Energy page** shows a chip per meter next to *Updated*: green while it reads, red when it
+  does not, with the address, poll interval, how far its record reaches and each unit's reading
+  on hover. A warning banner appears only when a meter stops reading or its history fails.
 - **The Activity log** records when a meter connects, stops reading and recovers, when history
   has been loaded, and when loading history fails.
 - **`GET /api/power-meters`** returns the same status as JSON.
@@ -158,8 +158,9 @@ A provider is a class in `server/powermeter/providers/` that extends `PowerMeter
 
 ```js
 export class ShellyPlugProvider extends PowerMeterProvider {
-  static type = "shelly";
-  static historyPeriods = []; // live only: no readHistory
+  static type = "shelly";          // the "type" in power-meters.json
+  static label = "Shelly";         // the name people see on the page and in the Activity log
+  static historyPeriods = [];      // live only: no readHistory
 
   static validate(spec) { return URL.canParse(spec.url) ? [] : ["url must be a URL"]; }
 
@@ -170,7 +171,7 @@ export class ShellyPlugProvider extends PowerMeterProvider {
 registerProvider(ShellyPlugProvider);
 ```
 
-Registration checks that the class extends the base, has a `type`, implements `readPower`, and
+Registration checks that the class extends the base, has a `type` and a `label`, implements `readPower`, and
 implements `readHistory` exactly when it lists `historyPeriods` (`5minute`, `hour`). A meter
 that cannot give its own timestamp should use the time of the read. Nothing outside
 `server/powermeter/` needs to change.

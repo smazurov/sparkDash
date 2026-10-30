@@ -142,6 +142,7 @@ function webSocketSession({ url, token, requests, timeoutMs, signal, WebSocketIm
 
 export class HomeAssistantProvider extends PowerMeterProvider {
   static type = "homeassistant";
+  static label = "Home Assistant";
   static historyPeriods = Object.freeze(["5minute", "hour"]);
 
   static validate(spec) {

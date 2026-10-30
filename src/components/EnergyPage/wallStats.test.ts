@@ -65,16 +65,16 @@ describe("wall stats", () => {
     expect(filledShare([row()])).toBe(0);
   });
 
-  it("sums the estimate, its parts and measured vs filled wall energy per node", () => {
+  it("sums GPU, CPU and measured vs filled wall energy per node", () => {
     const parts = nodeParts([metered(), metered({ t: T + HOUR })], ["a", "b"]);
-    expect(parts.get("a")).toEqual({ estimateKwh: 0.2, gpuKwh: 0.1, cpuKwh: 0.054, measuredKwh: 0.28, filledKwh: 0 });
+    expect(parts.get("a")).toEqual({ gpuKwh: 0.1, cpuKwh: 0.054, measuredKwh: 0.28, filledKwh: 0 });
     expect(parts.get("b")?.filledKwh).toBeCloseTo(0.14);
   });
 
-  it("draws estimate, GPU and CPU lines only for hours every node reported", () => {
+  it("draws GPU and CPU lines only for hours every node reported", () => {
     const lines = hourLines([metered(), metered({ t: T + HOUR, nodePartsCoverageMs: { a: HOUR, b: 0 } })], ["a", "b"]);
-    expect(lines.get(T)).toEqual({ estimate: 150, gpu: 70, cpu: 34 });
-    expect(lines.get(T + HOUR)).toEqual({ estimate: 150, gpu: null, cpu: null });
+    expect(lines.get(T)).toEqual({ gpu: 70, cpu: 34 });
+    expect(lines.get(T + HOUR)).toEqual({ gpu: null, cpu: null });
   });
 
   it("turns a month with wall power into a wall-basis month and leaves others alone", () => {

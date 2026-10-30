@@ -15,7 +15,7 @@
  *    (or it is an hour old), so a minute is counted once, with the meter's figure.
  */
 import { loadPowerMeterConfig } from "./config.js";
-import { PowerMeterProvider, createProvider } from "./providers/index.js";
+import { PowerMeterProvider, createProvider, providerClass } from "./providers/index.js";
 import { registerPowerMeterRoutes } from "./routes.js";
 
 const MINUTE_MS = 60_000;
@@ -83,6 +83,8 @@ export function createPowerMeterRuntime({
     const meter = {
       id,
       type: spec.type,
+      // The provider names itself; known even when it could not start.
+      label: providerClass(spec.type)?.label || spec.type,
       provider: null,
       error: null,
       health: "pending",
@@ -95,6 +97,7 @@ export function createPowerMeterRuntime({
       const provider = createProviderFn(spec, { env, logger });
       if (!(provider instanceof PowerMeterProvider)) throw new Error("provider does not extend PowerMeterProvider");
       meter.provider = provider;
+      meter.label = provider.label || meter.label;
     } catch (error) {
       meter.error = error.message;
       meter.health = "unavailable";
@@ -191,9 +194,7 @@ export function createPowerMeterRuntime({
   }
 
   function describeMeter(meter) {
-    const target = meter.provider?.describe().target;
-    const name = meter.type === "homeassistant" ? "Home Assistant" : meter.type;
-    return `${name} power meter "${meter.id}"${target ? ` (${target})` : ""}`;
+    return meters.size > 1 ? `${meter.label} (${meter.id})` : meter.label;
   }
 
   function setHealth(meter, ok, error) {
@@ -201,10 +202,12 @@ export function createPowerMeterRuntime({
     meter.health = ok ? "ok" : "error";
     if (ok && previous !== "ok") {
       const count = [...units.values()].filter((u) => u.meterId === meter.id && fresh(u, now())).length;
-      event(previous === "error" ? "recovered" : "connected", "success", `${describeMeter(meter)} ${previous === "error" ? "is reading again" : "connected"}: ${count} unit${count === 1 ? "" : "s"} reporting wall power`);
+      event(previous === "error" ? "recovered" : "connected", "success", previous === "error"
+        ? `${describeMeter(meter)} is reading again`
+        : `${describeMeter(meter)} connected: ${count} outlet${count === 1 ? "" : "s"}`);
       logger.log?.(`[powerMeters] meter ${meter.id} ok`);
     } else if (!ok && previous !== "error") {
-      event("unreachable", "error", `${describeMeter(meter)} is not reading: ${error}`);
+      event("unreachable", "error", `${describeMeter(meter)} stopped reading: ${error}`);
       logger.warn?.(`[powerMeters] meter ${meter.id}: ${error}`);
     }
   }
@@ -291,11 +294,11 @@ export function createPowerMeterRuntime({
       await fetchRange(meter, pending, "5minute", Math.max(fromMs, tracker.windowStartMs(t)), t, null);
     }
     if (stopped) return;
-    const imported = tracker.importWallHistory(older);
+    tracker.importWallHistory(older);
     for (const unit of pending) saveState(unit, { backfill: unit.backfillKey });
     meter.history.backfill = { ...meter.history.backfill, throughMs: t, doneAt: now() };
     const days = Math.round((t - fromMs) / DAY_MS);
-    event("history-loaded", "info", `${describeMeter(meter)}: loaded ${days} days of wall-power history for ${pending.map((u) => u.id).join(", ")}${imported ? ` (${Math.round(imported / pending.length)} hours per unit older than 31 days went to Monthly)` : ""}`);
+    event("history-loaded", "info", `${describeMeter(meter)}: ${days} days of history loaded`);
     tracker.flush();
   }
 
@@ -320,7 +323,7 @@ export function createPowerMeterRuntime({
       await catchUp(meter, meterUnits, "5minute", { initial });
       const hour = floorTo(now(), HOUR_MS);
       if (initial || lastHourlyRun !== hour) await catchUp(meter, meterUnits, "hour", { initial });
-      if (meter.historyFailing) event("history-recovered", "success", `${describeMeter(meter)}: history is loading again`);
+      if (meter.historyFailing) event("history-recovered", "success", `${describeMeter(meter)} history is loading again`);
       meter.historyFailing = false;
       meter.history.state = "ok";
       meter.history.lastOkAt = now();
@@ -328,7 +331,7 @@ export function createPowerMeterRuntime({
     } catch (error) {
       if (stopped) return;
       if (!meter.historyFailing) {
-        event("history-failed", "warn", `${describeMeter(meter)}: could not load history (${error.message}); live readings continue`);
+        event("history-failed", "warn", `${describeMeter(meter)} history failed: ${error.message}`);
       }
       meter.historyFailing = true;
       meter.history.state = "error";
@@ -375,6 +378,7 @@ export function createPowerMeterRuntime({
       meters: [...meters.values()].map((m) => ({
         id: m.id,
         type: m.type,
+        label: m.label,
         target: m.provider?.describe().target ?? null,
         health: m.health,
         ok: m.health === "ok",

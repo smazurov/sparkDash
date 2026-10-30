@@ -29,6 +29,8 @@ export type PowerMeterHistoryState = "pending" | "backfilling" | "ok" | "error" 
 export interface PowerMeterMeterStatus {
   id: string;
   type: string;
+  /** The provider's own name for the meter ("Home Assistant"). */
+  label: string;
   /** Display target (a URL or host), never a credential. */
   target: string | null;
   health: "pending" | "ok" | "error" | "unavailable";

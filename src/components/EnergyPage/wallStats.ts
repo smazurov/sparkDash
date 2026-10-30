@@ -2,9 +2,10 @@ import type { EnergyHistory, EnergyHistoryRow, MonthlyEnergyMonth } from "../../
 import { HOUR_MS } from "./energyStats";
 
 /**
- * Wall power on the Energy page. The tracker sends wall figures (measured plus filled from
+ * Wall power on the Energy page. The tracker sends wall figures (measured, gaps filled from
  * the estimate) beside the estimate's own; these helpers re-express them in the estimate's
- * row and month shapes, so summaries, buckets, insights and CSV run unchanged on either.
+ * row and month shapes, so summaries, buckets, insights and CSV run unchanged on either. Once
+ * wall power is measured the raw estimate is not shown: it only fills gaps, scaled.
  */
 
 /** True when the payload carries wall power (power meters are configured). */
@@ -49,20 +50,18 @@ export function filledShare(rows: readonly EnergyHistoryRow[]): number {
 }
 
 export interface NodeParts {
-  estimateKwh: number;
   gpuKwh: number;
   cpuKwh: number;
   measuredKwh: number;
   filledKwh: number;
 }
 
-/** Per node over `rows`: the estimate and its parts, and measured vs filled wall energy. */
+/** Per node over `rows`: GPU and CPU energy, and measured vs filled wall energy. */
 export function nodeParts(rows: readonly EnergyHistoryRow[], nodeIds: readonly string[]): Map<string, NodeParts> {
-  const out = new Map(nodeIds.map((id) => [id, { estimateKwh: 0, gpuKwh: 0, cpuKwh: 0, measuredKwh: 0, filledKwh: 0 }]));
+  const out = new Map(nodeIds.map((id) => [id, { gpuKwh: 0, cpuKwh: 0, measuredKwh: 0, filledKwh: 0 }]));
   for (const r of rows) {
     for (const id of nodeIds) {
       const n = out.get(id)!;
-      n.estimateKwh += (r.nodeWh[id] ?? 0) / 1000;
       n.gpuKwh += (r.nodeGpuWh?.[id] ?? 0) / 1000;
       n.cpuKwh += (r.nodeCpuWh?.[id] ?? 0) / 1000;
       n.measuredKwh += (r.nodeWallWh?.[id] ?? 0) / 1000;
@@ -73,14 +72,13 @@ export function nodeParts(rows: readonly EnergyHistoryRow[], nodeIds: readonly s
 }
 
 export interface HourLines {
-  estimate: number | null;
   gpu: number | null;
   cpu: number | null;
 }
 
 /**
- * Fleet watts per hour for the lines drawn over wall power: the estimate, and its GPU and
- * CPU parts. A line is only drawn for an hour every node reported in.
+ * Fleet GPU and CPU watts per hour, drawn over wall power. A line is only drawn for an hour
+ * every node reported in.
  */
 export function hourLines(rows: readonly EnergyHistoryRow[], nodeIds: readonly string[]): Map<number, HourLines> {
   const out = new Map<number, HourLines>();
@@ -90,7 +88,6 @@ export function hourLines(rows: readonly EnergyHistoryRow[], nodeIds: readonly s
   };
   for (const r of rows) {
     out.set(r.t, {
-      estimate: r.avgWatts ?? null,
       gpu: fleetWatts(r.nodeGpuWh, r.nodePartsCoverageMs),
       cpu: fleetWatts(r.nodeCpuWh, r.nodePartsCoverageMs),
     });

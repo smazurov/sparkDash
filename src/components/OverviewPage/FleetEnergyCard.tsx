@@ -56,7 +56,7 @@ export function FleetEnergyCard({
   const stale = (view?.staleNodeIds ?? []).map((id) => nodeNames?.[id] ?? id);
   const partialHelp =
     data && !data.membershipChanged && freshCount < nodeCount
-      ? `${wall ? "Energy is measured at the wall, and estimated where a meter has no reading." : "Energy is estimated from each node's live GPU and CPU readings."} ${
+      ? `${wall ? "Energy is measured at the wall; nodes without a reading are filled from the estimate." : "Energy is estimated from each node's live GPU and CPU readings."} ${
           stale.length ? `No fresh reading from: ${stale.join(", ")}. ` : ""
         }A node that is offline, unreachable or not reporting power stops the fleet total from being measured for that time, so 24h coverage drops. It recovers by itself once the node reports again.`
       : null;
@@ -103,7 +103,7 @@ export function FleetEnergyCard({
         <div className="big-num">{number(view?.energy24hKwh ?? null)}<small>kWh / 24 h</small></div>
         <div className="ov-card__sub mono">
           {wall
-            ? `Measured at the wall · estimate ${number(data?.energy24hKwh ?? null)} kWh · 24h coverage ${coverage.toFixed(1)}%`
+            ? `Wall-metered · 24h coverage ${coverage.toFixed(1)}%`
             : `Estimated, not wall-metered · 24h coverage ${coverage.toFixed(1)}%`}
         </div>
       </div>
