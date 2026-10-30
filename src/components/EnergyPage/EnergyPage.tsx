@@ -5,9 +5,12 @@ import { clearFleetEnergy, fetchEnergyHistory, fetchFleetEnergy } from "../../ap
 import { ClearMenu } from "../ui/ClearMenu";
 import type { EnergyHistory, FleetEnergy, Settings, SparkSnapshot } from "../../api/types";
 import { StackedBarChart, type BarBucket, type BarSeries } from "../ui/StackedBarChart";
-import { LineAreaChart, type LinePoint } from "../ui/LineAreaChart";
+import { LineAreaChart, type LineOverlay, type LinePoint } from "../ui/LineAreaChart";
 import { Tag } from "../ui/Tag";
 import { MonthlyEnergy } from "./MonthlyEnergy";
+import { MeterStatusPanel, meterName } from "./MeterStatus";
+import { filledShare, formatRatio, hasWall, hourLines, nodeParts, wallRows, type HourLines, type NodeParts } from "./wallStats";
+import { usePowerMeterStatus } from "../../hooks/usePowerMeters";
 import {
   NODE_COLORS,
   RANGE_DAYS,
@@ -147,12 +150,22 @@ export function EnergyPage({
   const nameOf = useCallback((id: string) => names.get(id) || id, [names]);
   const tz = browserTzOffset;
 
+  const meterStatus = usePowerMeterStatus();
+  const metered = hasWall(history);
+  const meterLabel = meterStatus?.enabled ? [...new Set(meterStatus.meters.map((m) => meterName(m.type)))].join(" and ") : "external power meters";
+
   const model = useMemo(() => {
     if (!history || history.membershipChanged) return null;
-    const rows = history.hourly;
+    const nodeIds = history.nodeIds;
+    // With meters configured every headline figure is wall power (measured, gaps filled
+    // from the estimate); the estimate and its GPU/CPU parts are drawn beside it.
+    const rows = hasWall(history) ? wallRows(history.hourly, nodeIds) : history.hourly;
     const win = rangeWindow(range, history.generatedAt, rows);
     const inRange = rowsInRange(rows, win.startMs, win.endHourMs);
-    const nodeIds = history.nodeIds;
+    const rawInRange = rowsInRange(history.hourly, win.startMs, win.endHourMs);
+    const wall = hasWall(history)
+      ? { lines: hourLines(rawInRange, nodeIds), parts: nodeParts(rawInRange, nodeIds), filled: filledShare(rawInRange) }
+      : null;
     const summary = summarize(rows, win, nodeIds, price);
     const mode: "hour" | "day" = range === "24h" ? "hour" : "day";
     const buckets = buildBuckets(rows, win, mode, tz);
@@ -160,7 +173,7 @@ export function EnergyPage({
     const powerBuckets = range === "24h" ? hourly : hourly.filter((b) => b.startMs >= floorHour(win.windowStartMs));
     const delta = previousPeriodDelta(rows, win, summary.kwh);
     const insights = buildInsights({ summary, buckets, rows: inRange, mode, tz, price, currency, nodeName: nameOf });
-    return { rows, inRange, win, summary, mode, buckets, powerBuckets, delta, insights, nodeIds };
+    return { rows, inRange, win, summary, mode, buckets, powerBuckets, delta, insights, nodeIds, wall };
   }, [history, range, price, currency, nameOf, tz]);
 
   const colorOf = useMemo(() => {
@@ -207,7 +220,7 @@ export function EnergyPage({
         </section>
       );
     }
-    if (!model || history.hourly.length === 0) {
+    if (!model || model.rows.length === 0) {
       return (
         <section className="panel en-state" role="status">
           <h2>Warming up</h2>
@@ -229,6 +242,8 @@ export function EnergyPage({
         setSort={setSort}
         onSelectSpark={onSelectSpark}
         stale={Boolean(historyError)}
+        sparks={sparks}
+        meterLabel={meterLabel}
       />
     );
   })();
@@ -239,7 +254,9 @@ export function EnergyPage({
         <div>
           <h1>Fleet energy</h1>
           <p className="page-head__sub">
-            Estimated electricity use of your Sparks from GPU and CPU power telemetry. Not wall-metered.
+            {metered
+              ? `Electricity use of your Sparks measured at the wall by ${meterLabel}, with the GPU+CPU estimate beside it.`
+              : "Estimated electricity use of your Sparks from GPU and CPU power telemetry. Not wall-metered."}
             {history ? <span className="mono en-updated"> Updated {new Date(history.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: activeTimeZone() })}</span> : null}
           </p>
         </div>
@@ -268,6 +285,7 @@ export function EnergyPage({
           <span className="sr-only" role="status" aria-live="polite">{copied === "ok" ? "CSV copied to clipboard" : ""}</span>
         </div>
       </div>
+      <MeterStatusPanel status={meterStatus} wall={live?.wall} nameOf={nameOf} />
       {body}
       <MonthlyEnergy nameOf={nameOf} price={price} currency={currency} reloadToken={monthlyReload} />
     </div>
@@ -285,6 +303,8 @@ interface Model {
   delta: PeriodDelta | null;
   insights: string[];
   nodeIds: string[];
+  /** Present when the figures are wall power: lines and parts for the estimate beside it. */
+  wall: { lines: Map<number, HourLines>; parts: Map<string, NodeParts>; filled: number } | null;
 }
 
 function EnergyBody({
@@ -300,6 +320,8 @@ function EnergyBody({
   setSort,
   onSelectSpark,
   stale,
+  sparks,
+  meterLabel,
 }: {
   model: Model;
   live: FleetEnergy | null;
@@ -313,13 +335,26 @@ function EnergyBody({
   setSort: (s: { key: NodeSortKey; dir: "asc" | "desc" }) => void;
   onSelectSpark?: (id: string) => void;
   stale: boolean;
+  sparks: SparkSnapshot[];
+  meterLabel: string;
 }) {
-  const { summary, win, mode, buckets, powerBuckets, delta, insights } = model;
+  const { summary, win, mode, buckets, powerBuckets, delta, insights, wall } = model;
+  const metered = wall !== null;
   const tz = browserTzOffset;
   const noData = !summary.hasData;
   const shortHistory = win.windowStartMs > win.startMs;
-  const fresh = live?.freshNodeCount ?? null;
   const total = live?.currentNodeIds.length || nodeTotal;
+  const fresh = metered
+    ? live?.wall ? total - live.wall.staleNodeIds.length : null
+    : live?.freshNodeCount ?? null;
+  const currentWatts = metered ? live?.wall?.currentWatts30s ?? null : live?.currentWatts30s ?? null;
+  // Live GPU and CPU draw of the fleet, straight from the unit snapshots.
+  const liveParts = sparks.length > 0 && sparks.every((s) => s.online && s.metrics?.gpu?.power && s.metrics?.cpu)
+    ? {
+        gpu: sparks.reduce((sum, s) => sum + (s.metrics?.gpu?.power?.draw || 0), 0),
+        cpu: sparks.reduce((sum, s) => sum + (s.metrics?.cpu?.draw || 0), 0),
+      }
+    : null;
 
   const series: BarSeries[] = summary.nodes.map((n) => ({ id: n.id, label: nameOf(n.id), color: colorOf(n.id) }));
   const barBuckets: BarBucket[] = buckets.map((b) => ({ key: b.key, label: b.label, title: b.title, values: b.nodeKwh }));
@@ -332,6 +367,14 @@ function EnergyBody({
     title: formatLocalHour(b.startMs, tz),
     value: b.avgWatts,
   }));
+  const lineAt = (key: keyof HourLines) => powerBuckets.map((b) => wall?.lines.get(b.startMs)?.[key] ?? null);
+  const overlays: LineOverlay[] = metered
+    ? [
+        { id: "estimate", label: "Estimate (GPU + CPU + 23 W)", color: "var(--color-muted)", values: lineAt("estimate"), dashed: true },
+        { id: "gpu", label: "GPU (measured)", color: "var(--color-accent)", values: lineAt("gpu") },
+        { id: "cpu", label: "CPU (modelled)", color: "var(--color-violet)", values: lineAt("cpu") },
+      ]
+    : [];
   const effBuckets = mode === "hour" ? powerBuckets : buckets;
   const effPoints: LinePoint[] = effBuckets.map((b) => ({ key: b.key, label: b.label, title: b.title, value: b.whPer1kTokens }));
   const showEff = effPoints.filter((p) => p.value != null).length >= 2;
@@ -342,19 +385,33 @@ function EnergyBody({
   return (
     <>
       {stale ? <p className="en-banner en-banner--warn" role="status">Could not refresh just now; showing the last data received.</p> : null}
-      <p className="en-banner" role="note">
-        <b>Estimated, not metered.</b> Figures are integrated from GPU and CPU power readings and leave out power-supply losses and other components, so the wall draw is somewhat higher.
-      </p>
+      {metered ? (
+        <p className="en-banner" role="note">
+          <b>Measured at the wall.</b> Energy, cost and efficiency come from {meterLabel}. Where no meter measured,
+          the GPU+CPU estimate is scaled by the ratio learned for that unit
+          {wall.filled > 0 ? <> ({pct(wall.filled, wall.filled < 0.1 ? 1 : 0)} of this range)</> : null}. The estimate and its GPU and CPU parts are drawn beside wall power.
+        </p>
+      ) : (
+        <p className="en-banner" role="note">
+          <b>Estimated, not metered.</b> Figures are integrated from GPU and CPU power readings and leave out power-supply losses and other components, so the wall draw is somewhat higher.
+        </p>
+      )}
 
       <section className="en-tiles" aria-label="Summary">
-        <Tile label="Current draw">
-          <div className="big-num mono">{live?.currentWatts30s != null ? Math.round(live.currentWatts30s) : "—"}<small>W</small></div>
+        <Tile label={metered ? "Current draw at the wall" : "Current draw"}>
+          <div className="big-num mono">{currentWatts != null ? Math.round(currentWatts) : "—"}<small>W</small></div>
           <div className="en-tile__sub">
             {fresh != null ? (
               <Tag tone={fresh === 0 ? "bad" : fresh < total ? "warn" : "good"}>{fresh}/{total} nodes fresh</Tag>
             ) : null}
-            <span>30 s average</span>
+            <span>30 s average{metered && live?.wall?.currentFilled ? ", partly estimated" : ""}</span>
           </div>
+          {metered ? (
+            <div className="en-tile__sub mono">
+              <span>estimate {live?.currentWatts30s != null ? Math.round(live.currentWatts30s) : "—"} W</span>
+              {liveParts ? <span>GPU {Math.round(liveParts.gpu)} W · CPU {Math.round(liveParts.cpu)} W</span> : null}
+            </div>
+          ) : null}
         </Tile>
         <Tile label={`Energy, ${rangeLabel}`}>
           <div className="big-num mono">{noData ? "—" : formatKwh(summary.kwh)}<small>kWh</small></div>
@@ -368,7 +425,7 @@ function EnergyBody({
             )}
           </div>
         </Tile>
-        <Tile label="Estimated cost">
+        <Tile label={metered ? "Cost" : "Estimated cost"}>
           <div className="big-num mono">{summary.cost != null && !noData ? formatMoney(summary.cost, currency) : "—"}</div>
           <div className="en-tile__sub">
             {price == null ? (
@@ -441,11 +498,24 @@ function EnergyBody({
               <header className="en-panel__head">
                 <div>
                   <h2 id="en-h-power">Average fleet power</h2>
-                  <p className="en-panel__sub">Watts per hour while every node reported. Gaps mean no full-fleet coverage.</p>
+                  <p className="en-panel__sub">
+                    {metered
+                      ? "Wall watts per hour, with the estimate and its GPU and CPU parts. Gaps mean no full-fleet coverage."
+                      : "Watts per hour while every node reported. Gaps mean no full-fleet coverage."}
+                  </p>
                 </div>
+                {metered ? (
+                  <div className="legend" aria-label="Lines">
+                    <span style={{ "--c": "var(--color-info)" } as React.CSSProperties}>Wall</span>
+                    {overlays.map((o) => (
+                      <span key={o.id} style={{ "--c": o.color } as React.CSSProperties}>{o.label}</span>
+                    ))}
+                  </div>
+                ) : null}
               </header>
               <LineAreaChart
                 points={powerPoints}
+                overlays={overlays}
                 height={200}
                 format={(v) => `${Math.round(v)}`}
                 unit="W"
@@ -477,7 +547,11 @@ function EnergyBody({
             <header className="en-panel__head">
               <div>
                 <h2 id="en-h-nodes">By node</h2>
-                <p className="en-panel__sub">Each node is measured only while it reports, so coverage differs per node.</p>
+                <p className="en-panel__sub">
+                  {metered
+                    ? "Wall energy per node (filled from the estimate where its meter had no reading), next to the estimate and its GPU and CPU parts."
+                    : "Each node is measured only while it reports, so coverage differs per node."}
+                </p>
               </div>
             </header>
             <div className="en-table-wrap">
@@ -492,6 +566,13 @@ function EnergyBody({
                     <SortTh k="peakWatts" label="Peak hour" sort={sort} setSort={setSort} />
                     <SortTh k="coverage" label="Coverage" sort={sort} setSort={setSort} />
                     <SortTh k="cost" label="Cost" sort={sort} setSort={setSort} />
+                    {metered ? (
+                      <>
+                        <th scope="col">Estimate</th>
+                        <th scope="col">GPU</th>
+                        <th scope="col">CPU</th>
+                      </>
+                    ) : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -519,6 +600,7 @@ function EnergyBody({
                       </td>
                       <td className="mono">{pct(n.coverage, 1)}</td>
                       <td className="mono">{n.cost != null ? formatMoney(n.cost, currency) : "—"}</td>
+                      {metered ? <PartCells parts={wall.parts.get(n.id)} /> : null}
                     </tr>
                   ))}
                 </tbody>
@@ -543,8 +625,18 @@ function EnergyBody({
         <section className="panel en-panel" aria-labelledby="en-h-notes">
           <header className="en-panel__head"><h2 id="en-h-notes">About this data</h2></header>
           <ul className="en-list en-list--notes">
-            <li><b>Estimated.</b> Energy is power telemetry (GPU + CPU) integrated over time, not a wall meter reading.</li>
-            <li><b>Gaps.</b> Hours with no telemetry are left out, never filled in. Coverage is the share of time every node reported fresh data; per-node coverage is in the table.</li>
+            {metered ? (
+              <>
+                <li><b>Measured at the wall.</b> {meterLabel} reads each unit's outlet, so the figures include power-supply losses and anything else on that outlet. Live readings appear first; the meter's own 5-minute and hourly record replaces them as it arrives.</li>
+                <li><b>Filled gaps.</b> Where a meter had no reading, or a unit has none, its wall power is the estimate times the wall/estimate ratio learned over the last 7 days ({Object.entries(live?.wall?.ratios ?? {}).map(([id, r]) => `${nameOf(id)} ${formatRatio(r)}`).join(", ") || "not learned yet"}). Time neither covers is left out.</li>
+                <li><b>Parts.</b> GPU power is the card's own reading; CPU power is modelled from utilization; the estimate adds 23 W for memory, network and the rest.</li>
+              </>
+            ) : (
+              <>
+                <li><b>Estimated.</b> Energy is power telemetry (GPU + CPU) integrated over time, not a wall meter reading.</li>
+                <li><b>Gaps.</b> Hours with no telemetry are left out, never filled in. Coverage is the share of time every node reported fresh data; per-node coverage is in the table.</li>
+              </>
+            )}
             <li><b>Efficiency</b> only counts tokens and energy from time when all nodes were reporting.</li>
             <li><b>Retention.</b> Hourly history is kept for 31 days. Longer ranges show what exists so far.</li>
             <li><b>Local time.</b> Hours and days follow the time zone in Settings, or this browser's by default ({activeTimeZone()}). Hourly rows are stored in UTC.</li>
@@ -552,6 +644,17 @@ function EnergyBody({
           </ul>
         </section>
       </div>
+    </>
+  );
+}
+
+function PartCells({ parts }: { parts?: NodeParts }) {
+  const kwh = (v?: number) => (v != null ? `${formatKwh(v)} kWh` : "—");
+  return (
+    <>
+      <td className="mono">{kwh(parts?.estimateKwh)}</td>
+      <td className="mono">{kwh(parts?.gpuKwh)}</td>
+      <td className="mono">{kwh(parts?.cpuKwh)}</td>
     </>
   );
 }
