@@ -9,7 +9,7 @@ import path from "node:path";
 import { FleetEnergyTracker, estimateNodeParts, estimateNodeWatts } from "../../energy/FleetEnergyTracker.js";
 import { MonthlyEnergyArchive } from "../../energy/FleetEnergyMonthly.js";
 import { runFleetEnergySamplerTick } from "../../energy/FleetEnergyRuntime.js";
-import { wallMinute } from "../../energy/wallMinute.js";
+import { wallHour, wallMinute } from "../../energy/wallMinute.js";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -377,6 +377,88 @@ test("every hour of the meter's record reaches Monthly exactly once, however oft
   assert.equal(month.nodes.a.wallCoverageMs, 12 * HOUR);
   close(month.fleetWallWh, 2 * 12 * 60, 1e-6);
   assert.equal(month.fleetWallCoverageMs, 12 * HOUR);
+});
+
+test("wallHour: a metered node's hourly figure stands for the whole hour; others are filled from their minutes", () => {
+  const ids = ["a", "b"];
+  const metered = new Set(ids);
+  // Estimate: a 60 W, b 30 W; ratios a 1.5, b 2.
+  const buckets = Array.from({ length: 60 }, (_, i) => ({
+    minuteStartMs: T0 + i * MINUTE,
+    nodeWh: { a: 1, b: 0.5 },
+    nodeCoverageMs: { a: MINUTE, b: MINUTE },
+    outputTokens: 2,
+  }));
+  const ratios = new Map([["a", 1.5], ["b", 2]]);
+  const hour = wallHour(buckets, ids, metered, ratios, new Map([["a", 100]]));
+  assert.deepEqual(hour.nodes.a, { wh: 100, coverageMs: HOUR, meteredMs: HOUR, filledWh: 0, filledMs: 0 }, "not filled on top");
+  close(hour.nodes.b.filledWh, 60);
+  assert.equal(hour.nodes.b.filledMs, HOUR);
+  close(hour.fleet.wh, 160);
+  close(hour.fleet.filledWh, 60);
+  assert.deepEqual([hour.fleet.coverageMs, hour.fleet.full, hour.outputTokens], [HOUR, true, 120]);
+  // Half an hour of estimate for b: the fleet covers what every node covered, pro rata.
+  const half = wallHour(buckets.slice(0, 30), ids, metered, ratios, new Map([["a", 100]]));
+  assert.equal(half.fleet.coverageMs, 30 * MINUTE);
+  close(half.fleet.wh, 100 / 2 + 30);
+  assert.equal(half.fleet.full, false);
+  // An unmetered node's figure is ignored; nothing at all gives null.
+  assert.equal(wallHour([], ids, new Set(["b"]), ratios, new Map([["a", 100]])), null);
+});
+
+test("before the boundary the views show the meter's hourly figures: what Monthly imported, never filled on top", () => {
+  const { tracker, setNow } = makeTracker({ now: T0 - 2 * DAY });
+  // An hour of estimate before meters existed.
+  feed(tracker, setNow, T0 - 2 * DAY, T0 - 2 * DAY + HOUR, () => [snap("a"), snap("b")]);
+  setNow(T0);
+  tracker.configureWall({ nodeIds: ["a", "b"] });
+  const start = tracker.wallStartMs;
+  const hours = Array.from({ length: 30 }, (_, i) => ({ startMs: start - (i + 1) * HOUR, endMs: start - i * HOUR, meanW: 100 }));
+  assert.equal(tracker.snapshot(T0).wall.energy31dKwh, null, "nothing yet (and the sums are cached now)");
+  tracker.importWallHistory(new Map([["a", hours]]));
+  const rows = tracker.history(T0).hourly.filter((r) => r.nodeWallWh);
+  assert.equal(rows.length, 30);
+  for (const r of rows) {
+    assert.ok(r.t < start);
+    assert.deepEqual([r.nodeWallWh.a, r.nodeWallMeteredMs.a, r.nodeWallFilledWh.a], [100, HOUR, 0], new Date(r.t).toISOString());
+  }
+  const withEstimate = rows.find((r) => r.t === T0 - 2 * DAY);
+  assert.ok(withEstimate.nodeCoverageMs.a > 0 && withEstimate.nodeWallWh.a === 100, "the hour's estimate does not add to it");
+  const [month] = tracker.monthlySnapshot(T0).months;
+  assert.equal(month.nodes.a.wallWh, 30 * 100, "the same hours, the same figures as Monthly");
+  // The snapshot counts them too; an hour cut by the 24 h edge counts pro rata.
+  close(tracker.snapshot(T0).wall.energy31dKwh, 3);
+  assert.equal(tracker.snapshot(T0).wall.energy24hKwh, null, "the boundary is exactly 24 h back");
+  close(tracker.snapshot(T0 - 30 * MINUTE).wall.energy24hKwh, 0.05);
+});
+
+test("the hourly figures are saved, leave with the window, and go with wall power", (t) => {
+  const dir = tempDir(t);
+  const files = { filePath: path.join(dir, "fleet-energy.json"), monthlyFilePath: path.join(dir, "fleet-energy-monthly.json") };
+  const { tracker } = makeTracker(files);
+  tracker.configureWall({ nodeIds: ["a", "b"] });
+  const start = tracker.wallStartMs;
+  const hours = (id, n) => [id, Array.from({ length: n }, (_, i) => ({ startMs: start - (i + 1) * HOUR, endMs: start - i * HOUR, meanW: 50 }))];
+  tracker.importWallHistory(new Map([hours("a", 3), hours("b", 2)]));
+  tracker.close();
+  const load = (now = T0) => {
+    const { tracker: again } = makeTracker({ ...files, now });
+    again.configureWall({ nodeIds: ["a", "b"] });
+    return again;
+  };
+  const walled = (tr, at = T0) => tr.history(at).hourly.filter((r) => r.nodeWallWh).map((r) => [r.nodeWallWh.a, r.nodeWallWh.b]);
+  assert.deepEqual(walled(load()), [[50, 0], [50, 50], [50, 50]]);
+  const outlet = load();
+  outlet.clearWall("b");
+  assert.deepEqual(walled(outlet), [[50, 0], [50, 0], [50, 0]]);
+  const dropped = load();
+  dropped.dropWall();
+  assert.deepEqual(walled(dropped), []);
+  const reset = load();
+  reset.clear();
+  assert.deepEqual(walled(reset), []);
+  // Thirty-one days on, they have left the window.
+  assert.deepEqual(walled(load(T0 + 31 * DAY), T0 + 31 * DAY), []);
 });
 
 test("an hour listed twice in one import counts once", () => {
