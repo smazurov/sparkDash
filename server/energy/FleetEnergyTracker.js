@@ -26,6 +26,13 @@ const PERSISTENCE_RELATIVE_TOLERANCE = 1e-9;
 const MAX_PART_WATTS = 5_000;
 const MAX_WALL_WATTS = 20_000;
 const WALL_PERIODS_MS = new Set([5 * MINUTE_MS, HOUR_MS]);
+/**
+ * How far back wall minutes begin when wall power is first configured. Meter history before
+ * that boundary goes into the monthly archive as hourly totals, never into minutes; the last
+ * day is written as minutes so the 24 h views are measured from the start (1,440 minutes,
+ * small enough for the periodic recent write).
+ */
+export const WALL_BACKFILL_MS = DAY_MS;
 // Persistence. The full file is rewritten at most hourly (and by flush()/close()); in
 // between, the periodic flush writes only the minutes changed since then to a small
 // "recent" file beside it, which loading merges back in. A large change set (a backfill)
@@ -217,18 +224,23 @@ function roundSeries(series) {
  */
 function serializeBucket(bucket) {
   if (!bucket.parts && !bucket.wall) return bucket;
-  const estimateEmpty =
+  const { parts, wall, ...estimate } = bucket;
+  const out = estimateEmpty(bucket) ? { minuteStartMs: bucket.minuteStartMs } : { ...estimate };
+  if (parts) out.parts = roundSeries(parts);
+  if (wall) out.wall = roundSeries(wall);
+  return out;
+}
+
+/** True when a bucket holds nothing of the estimate's own (no energy, coverage or tokens). */
+function estimateEmpty(bucket) {
+  return (
     !bucket.fleetWattMs &&
     !bucket.fleetCoverageMs &&
     !bucket.outputTokens &&
     !bucket.coveredOutputTokens &&
     Object.values(bucket.nodeWh).every((v) => !v) &&
-    Object.values(bucket.nodeCoverageMs).every((v) => !v);
-  const { parts, wall, ...estimate } = bucket;
-  const out = estimateEmpty ? { minuteStartMs: bucket.minuteStartMs } : { ...estimate };
-  if (parts) out.parts = roundSeries(parts);
-  if (wall) out.wall = roundSeries(wall);
-  return out;
+    Object.values(bucket.nodeCoverageMs).every((v) => !v)
+  );
 }
 
 function sameEntry(a, b) {
@@ -374,6 +386,7 @@ export class FleetEnergyTracker {
     this._ratioCache = null;
     // Opaque bookkeeping of the meter integration (watermarks, backfill keys), persisted here.
     this._wallState = {};
+    this._wallFoldKey = null;
     // Minutes changed since the last full write, for the small periodic write.
     this._changedMinutes = new Set();
     this._lastFullWriteAt = null;
@@ -547,7 +560,26 @@ export class FleetEnergyTracker {
     this._wallNodeIdSet = new Set(this._wallNodeIds);
     this._wallSettledBefore = typeof settledBefore === "function" ? settledBefore : () => Infinity;
     this._ratioCache = null;
+    this._startWall();
+    // Wall minutes may now fold even within a minute that has already folded.
+    this._wallFoldKey = null;
     return this._wallNodeIds;
+  }
+
+  /** Fix the wall boundary (once; it is kept in the monthly archive) while meters are configured. */
+  _startWall() {
+    const now = this._now();
+    if (this._wallNodeIds.length === 0 || !Number.isFinite(now)) return;
+    this.monthly.startWall(Math.floor((now - WALL_BACKFILL_MS) / HOUR_MS) * HOUR_MS);
+  }
+
+  /**
+   * Where wall minutes begin, or null before wall power was ever configured. Meter history
+   * before it lives in the monthly archive as hourly totals (importWallHistory); minutes
+   * before it never hold wall power.
+   */
+  get wallStartMs() {
+    return this.monthly.wallStartMs;
   }
 
   get wallNodeIds() {
@@ -613,13 +645,13 @@ export class FleetEnergyTracker {
   /**
    * Overwrite wall minutes with the meter's own record. 5-minute periods replace whatever
    * the minutes held; hourly periods only fill minutes the meter has not confirmed at finer
-   * resolution. Periods that are unfinished, unaligned, outside the window or before
-   * `sinceMs` are ignored. Returns how many periods were applied.
+   * resolution. Periods that are unfinished, unaligned, outside the window, before the wall
+   * boundary (wallStartMs) or before `sinceMs` are ignored. Returns how many periods were applied.
    */
   applyWallPeriods(nodeId, periods, { sinceMs = null } = {}) {
     if (!this._wallNodeIds.includes(nodeId) || !Array.isArray(periods)) return 0;
     const now = this._now();
-    const cutoff = this.windowStartMs(now);
+    const cutoff = Math.max(this.windowStartMs(now), this.wallStartMs ?? Infinity);
     let applied = 0;
     let changed = 0;
     for (const period of periods) {
@@ -644,25 +676,60 @@ export class FleetEnergyTracker {
     }
     if (changed > 0) {
       this._dirty = true;
+      // Settled minutes changed: let the next fold see them, even within the same minute.
+      this._wallFoldKey = null;
       this._ratioCache = null;
     }
     return applied;
   }
 
   /**
-   * Meter history older than the minute window goes straight into the monthly archive.
-   * `periodsByNode` maps node id → hourly periods.
+   * Meter history from before the wall boundary goes straight into the monthly archive as
+   * hourly totals. `periodsByNode` maps node id → hourly periods.
    */
   importWallHistory(periodsByNode) {
     const nodeIds = [...periodsByNode.keys()].filter((id) => this._wallNodeIds.includes(id));
-    if (nodeIds.length === 0) return 0;
-    const imported = this.monthly.importWallHours(periodsByNode, {
+    if (nodeIds.length === 0 || this.wallStartMs === null) return 0;
+    return this.monthly.importWallHours(periodsByNode, {
       nodeIds,
       fleetNodeIds: this._wallNodeIds,
-      beforeMs: this.monthly.wallFoldedFromMs ?? this.windowStartMs(),
+      beforeMs: this.wallStartMs,
     });
-    if (imported > 0) this._dirty = true;
-    return imported;
+  }
+
+  /**
+   * Remove all recorded wall power: every minute's wall entry, the months' wall figures, the
+   * wall boundary and the meter bookkeeping. The estimate and its GPU/CPU parts are kept.
+   * While meters are configured, recording starts over with a new boundary, and the next
+   * history pass loads the meter's record again.
+   * @returns {{ minutes: number, months: number }}
+   */
+  dropWall() {
+    let minutes = 0;
+    for (const [minuteStartMs, bucket] of this._buckets) {
+      if (!bucket.wall) continue;
+      delete bucket.wall;
+      minutes += 1;
+      // A minute that only held wall power is empty now.
+      if (!bucket.parts && estimateEmpty(bucket)) this._buckets.delete(minuteStartMs);
+    }
+    let latest = null;
+    for (const minuteStartMs of this._buckets.keys()) latest = Math.max(latest ?? minuteStartMs, minuteStartMs);
+    this._latestBucketStart = latest;
+    this._wallState = {};
+    this._wallBaselines.clear();
+    this._wallHighWaterMs = null;
+    this._recentWallSamples = [];
+    this._latestWallFreshIds = [];
+    this._latestWallFilledIds = [];
+    this._ratioCache = null;
+    const months = this.monthly.dropWall();
+    this._startWall();
+    this._wallFoldKey = null;
+    this._dirty = true;
+    this._fullWriteNeeded = true;
+    this.flush();
+    return { minutes, months };
   }
 
   _integrateFleet(previous, current) {
@@ -857,28 +924,33 @@ export class FleetEnergyTracker {
   /** Move finished minutes into the monthly archive (cheap unless a minute just closed). */
   _foldClosedMinutes(atMs) {
     const boundary = MonthlyEnergyArchive.closedBefore(atMs);
-    if (boundary === this._lastFoldBoundary) return;
-    this._lastFoldBoundary = boundary;
-    this.monthly.foldBuckets(this._buckets.values(), {
-      nowMs: atMs,
-      trackedSinceMs: this._tokensTrackedSinceMs,
-    });
-    if (this._wallNodeIds.length > 0) {
-      let settledBeforeMs = -Infinity;
-      try {
-        settledBeforeMs = this._wallSettledBefore();
-      } catch {
-        // An unanswerable meter folds nothing this time.
-      }
-      this.monthly.foldWall(this._buckets.values(), {
+    if (boundary !== this._lastFoldBoundary) {
+      this._lastFoldBoundary = boundary;
+      this.monthly.foldBuckets(this._buckets.values(), {
         nowMs: atMs,
-        settledBeforeMs,
-        nodeIds: this.nodeIds,
-        wallNodeIds: this._wallNodeIds,
-        ratios: this._ratios(atMs).byNode,
         trackedSinceMs: this._tokensTrackedSinceMs,
       });
     }
+    if (this._wallNodeIds.length === 0) return;
+    let settledBeforeMs = -Infinity;
+    try {
+      settledBeforeMs = this._wallSettledBefore();
+    } catch {
+      // An unanswerable meter folds nothing this time.
+    }
+    // Wall minutes also wait for the meter to settle them: fold again whenever the minute or
+    // the settled point moves, or settled minutes changed (see _wallFoldKey resets).
+    const key = `${boundary}|${settledBeforeMs}`;
+    if (key === this._wallFoldKey) return;
+    this._wallFoldKey = key;
+    this.monthly.foldWall(this._buckets.values(), {
+      nowMs: atMs,
+      settledBeforeMs,
+      nodeIds: this.nodeIds,
+      wallNodeIds: this._wallNodeIds,
+      ratios: this._ratios(atMs).byNode,
+      trackedSinceMs: this._tokensTrackedSinceMs,
+    });
   }
 
   /** Permanent per-month totals. A fold here only dirties the archive; the next tracker flush persists it. */

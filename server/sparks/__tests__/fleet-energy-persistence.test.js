@@ -10,6 +10,7 @@ import { FleetEnergyTracker } from "../../energy/FleetEnergyTracker.js";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 const T0 = Date.parse("2026-10-20T12:00:00Z");
 
 function setup(t) {
@@ -126,17 +127,21 @@ test("the full file is rewritten hourly, after a large change, and on flush/clos
   env.tick();
   assert.equal(fs.existsSync(env.recentPath), false);
 
-  // A backfill's worth of changes goes straight to a full write.
-  feed(env, tracker, later + 6000, later + 8000);
+  // After two days down, the meter's record for them is a large change: straight to a full write.
+  const resumed = later + 2 * DAY;
+  feed(env, tracker, resumed, resumed + 2000);
+  env.tick();
+  feed(env, tracker, resumed + 4000, resumed + 6000);
   env.tick();
   assert.equal(fs.existsSync(env.recentPath), true);
-  const p = Array.from({ length: 40 }, (_, i) => ({ startMs: T0 - (i + 1) * HOUR, endMs: T0 - i * HOUR, meanW: 50 }));
-  tracker.applyWallPeriods("a", p);
+  const end = Math.floor(resumed / HOUR) * HOUR;
+  const p = Array.from({ length: 40 }, (_, i) => ({ startMs: end - (i + 1) * HOUR, endMs: end - i * HOUR, meanW: 50 }));
+  assert.equal(tracker.applyWallPeriods("a", p), 40);
   env.tick();
   assert.equal(fs.existsSync(env.recentPath), false);
 
   // close() leaves a single file even when only the recent file was behind.
-  feed(env, tracker, later + 10_000, later + 12_000);
+  feed(env, tracker, resumed + 10_000, resumed + 12_000);
   env.tick();
   assert.equal(fs.existsSync(env.recentPath), true);
   assert.equal(tracker.close(), true);

@@ -56,9 +56,10 @@ class LivePlug extends PowerMeterProvider {
   }
 }
 
-function harness({ provider = new FakeStrip({}), configResult = okConfig(), createProviderFn, nodeIds = ["spark-a", "spark-b"] } = {}) {
+function harness({ provider = new FakeStrip({}), configResult = okConfig(), createProviderFn, nodeIds = ["spark-a", "spark-b"], beforeRuntime } = {}) {
   let clock = T0 + 2 * HOUR + 10_000;
   const tracker = new FleetEnergyTracker({ nodeIds, now: () => clock, load: false, setIntervalFn: null });
+  beforeRuntime?.(tracker);
   const events = [];
   const runtime = createPowerMeterRuntime({
     configResult,
@@ -81,6 +82,10 @@ async function serve(runtime) {
   const base = `http://127.0.0.1:${server.address().port}`;
   return { get: (p) => fetch(base + p), post: (p) => fetch(base + p, { method: "POST" }), close: () => new Promise((r) => server.close(r)) };
 }
+
+// Monthly reports to 3 decimals, and minutes store a microwatt-hour.
+const close = (actual, expected, eps = 2e-3) => assert.ok(Math.abs(actual - expected) <= eps, `${actual} ≈ ${expected}`);
+const monthTotal = (tracker, id, atMs) => tracker.monthlySnapshot(atMs).months.reduce((sum, m) => sum + (m.nodes[id]?.wallWh ?? 0), 0);
 
 const hourRows = (from, count, meanW) =>
   Array.from({ length: count }, (_, i) => ({ startMs: from + i * HOUR, endMs: from + (i + 1) * HOUR, meanW }));
@@ -160,27 +165,34 @@ test("health changes are announced in the activity log and exported", async () =
   assert.equal(runtime.status().meters[0].health, "ok");
 });
 
-test("the first pass backfills: window minutes into the tracker, older hours into months", async () => {
-  const { runtime, tracker, provider, events, at } = harness();
-  const windowStart = tracker.windowStartMs(at());
-  const from = windowStart - 10 * HOUR;
-  provider.history.hour.set("sensor.p3", hourRows(from, 12, 55));
-  provider.history.hour.set("sensor.p4", hourRows(from, 12, 45));
+test("the first pass backfills: hours before the wall boundary into months, the last day as minutes", async () => {
+  const { runtime, tracker, provider, events, advance, at } = harness();
+  const start = tracker.wallStartMs;
+  assert.equal(start, Math.floor((at() - DAY) / HOUR) * HOUR, "the boundary is the hour a day before the meters were configured");
+  assert.equal(runtime.status().wallStartMs, start);
+  // The meter's hourly record spans the boundary: 10 hours before it, 20 after.
+  provider.history.hour.set("sensor.p3", hourRows(start - 10 * HOUR, 30, 55));
+  provider.history.hour.set("sensor.p4", hourRows(start - 10 * HOUR, 30, 45));
   const fiveMin = Math.floor((at() - 10 * MINUTE) / (5 * MINUTE)) * 5 * MINUTE;
-  provider.history["5minute"].set("sensor.p3", [{ startMs: fiveMin, endMs: fiveMin + 5 * MINUTE, meanW: 70 }]);
+  provider.history["5minute"].set("sensor.p3", [
+    { startMs: start - HOUR, endMs: start - HOUR + 5 * MINUTE, meanW: 999 },
+    { startMs: fiveMin, endMs: fiveMin + 5 * MINUTE, meanW: 70 },
+  ]);
 
   assert.equal(runtime.settledBefore(), -Infinity, "nothing settles before the first pass");
   await runtime.reconcileOnce();
-  const hourCall = provider.calls.find((c) => c.period === "hour");
-  assert.ok(hourCall.fromMs <= SINCE + HOUR, "backfill starts at the earliest since");
+  const imports = provider.calls.filter((c) => c.period === "hour" && c.toMs <= start);
+  assert.ok(imports[0].fromMs <= SINCE + HOUR, "the import starts at the earliest since");
+  assert.equal(imports.at(-1).toMs, start, "and stops at the boundary");
+  const minuteCalls = provider.calls.filter((c) => !imports.includes(c));
+  assert.ok(minuteCalls.length > 0 && minuteCalls.every((c) => c.fromMs >= start), "minutes are only fetched from the boundary on");
 
-  // 10 hours before the window went to Monthly; the 2 inside it into minute buckets.
-  const months = tracker.monthlySnapshot().months;
-  const imported = months.reduce((sum, m) => sum + (m.nodes["spark-a"]?.wallWh ?? 0), 0);
-  assert.ok(imported >= 10 * 55 - 1e-6, `imported ${imported}`);
+  // Minutes hold the meter's figures from the boundary on, and nothing before it.
   const rows = tracker.history(at()).hourly;
-  assert.equal(rows.find((r) => r.t === windowStart)?.nodeWallWh["spark-a"], 55);
-  assert.equal(rows.find((r) => r.t === windowStart)?.nodeWallMeteredMs["spark-a"], HOUR);
+  assert.ok(rows.every((r) => r.t >= start));
+  const first = rows.find((r) => r.t === start);
+  assert.equal(first.nodeWallWh["spark-a"], 55);
+  assert.equal(first.nodeWallMeteredMs["spark-a"], HOUR);
 
   const unit = runtime.status().units[0];
   assert.equal(unit.reconciledThroughMs, fiveMin + 5 * MINUTE);
@@ -188,12 +200,40 @@ test("the first pass backfills: window minutes into the tracker, older hours int
   assert.equal(runtime.settledBefore(), Math.min(fiveMin + 5 * MINUTE, at() - HOUR));
   assert.equal(runtime.status().meters[0].history.state, "ok");
   assert.deepEqual(events.map((e) => e.type), ["power-meter.history-loaded"]);
+  // What has settled is in Monthly at once, without waiting for the minute to turn.
+  close(monthTotal(tracker, "spark-a", at()), 30 * 55);
+  close(monthTotal(tracker, "spark-b", at()), 30 * 45);
 
   // Steady state: no second backfill, a short 5-minute lookback, no hourly fetch within the hour.
   provider.calls.length = 0;
   await runtime.reconcileOnce();
   assert.ok(provider.calls.every((c) => c.period === "5minute" && c.fromMs >= at() - 6 * HOUR - 5 * MINUTE));
   assert.deepEqual(events.map((e) => e.type), ["power-meter.history-loaded"]);
+
+  // Once everything has settled, every hour of the meter's record is in Monthly exactly once:
+  // the 10 before the boundary imported, the 20 after it (and the 5-minute figure) folded.
+  advance(3 * HOUR);
+  close(monthTotal(tracker, "spark-a", at()), 30 * 55 + (70 * 5) / 60);
+  close(monthTotal(tracker, "spark-b", at()), 30 * 45);
+});
+
+test("a unit metered after the boundary was fixed is imported only up to it", async () => {
+  const early = Math.floor((T0 - 5 * DAY) / HOUR) * HOUR;
+  const { runtime, tracker, provider, advance, at } = harness({ beforeRuntime: (t) => t.monthly.startWall(early) });
+  assert.equal(tracker.wallStartMs, early, "an existing boundary is kept");
+  provider.history.hour.set("sensor.p3", hourRows(early - 2 * HOUR, 124, 60));
+  await runtime.reconcileOnce();
+  const imports = provider.calls.filter((c) => c.period === "hour" && c.toMs <= early);
+  assert.equal(imports.at(-1).toMs, early);
+  // Minutes come from the backfill's last day and the regular hourly lookback, never further.
+  const minuteCalls = provider.calls.filter((c) => !imports.includes(c));
+  assert.ok(minuteCalls.every((c) => c.fromMs >= at() - 2 * DAY - HOUR), JSON.stringify(minuteCalls));
+  const metered = tracker.history(at()).hourly.filter((r) => (r.nodeWallWh?.["spark-a"] ?? 0) > 0);
+  assert.equal(metered[0].t, Math.floor((at() - 2 * DAY) / HOUR) * HOUR);
+  // Months: the 2 hours before the boundary, plus the minutes that fold; the time between
+  // the boundary and those minutes was never metered and is in neither.
+  advance(3 * HOUR);
+  close(monthTotal(tracker, "spark-a", at()), 2 * 60 + metered.length * 60);
 });
 
 test("a failing history keeps live readings and is announced once", async () => {
