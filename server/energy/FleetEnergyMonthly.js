@@ -21,11 +21,12 @@ import { wallMinute } from "./wallMinute.js";
  *
  * Optional series ride along as pure additions, present only once recorded:
  *  - GPU and CPU parts of the estimate fold with the estimate, under the same watermark.
- *  - Wall power from an external meter folds under its own watermark
- *    (`wallFoldedThroughMs`), and only once the meter has settled a minute, because the
- *    meter's own record may still replace live readings. Meter history older than the
- *    tracker's window is imported per hour (`importWallHours`); `wallImportedFromMs`
- *    per node makes that import idempotent.
+ *  - Wall power has one fixed boundary, `wallStartMs` (see startWall). From it on, wall
+ *    minutes fold under their own watermark (`wallFoldedThroughMs`), and only once the
+ *    meter has settled a minute, because the meter's own record may still replace live
+ *    readings. Before it, the meter's hourly record is imported per hour
+ *    (`importWallHours`), never as minutes; `wallImportedFromMs` per node makes that
+ *    import idempotent. So every hour comes from exactly one of the two.
  */
 
 const FILE_VERSION = 1;
@@ -105,7 +106,7 @@ export class MonthlyEnergyArchive {
     this._months = new Map();
     this._foldedThroughMs = 0;
     this._wallFoldedThroughMs = 0;
-    this._wallFoldedFromMs = null;
+    this._wallStartMs = null;
     this._wallImportedFromMs = {};
     this._dirty = false;
     this._load();
@@ -115,9 +116,59 @@ export class MonthlyEnergyArchive {
     return this._foldedThroughMs;
   }
 
-  /** Earliest minute whose wall power was folded, or null before the first wall fold. */
-  get wallFoldedFromMs() {
-    return this._wallFoldedFromMs;
+  /** Where wall minutes begin: earlier hours are imported, later minutes folded. Null until wall power starts. */
+  get wallStartMs() {
+    return this._wallStartMs;
+  }
+
+  /**
+   * Fix the wall boundary the first time wall power is recorded; later calls change nothing.
+   * @param {number} startMs  hour-aligned
+   * @returns {boolean} whether the boundary was set now
+   */
+  startWall(startMs) {
+    if (this._wallStartMs !== null || !Number.isSafeInteger(startMs) || startMs < 0 || startMs % (60 * MINUTE_MS) !== 0) return false;
+    this._wallStartMs = startMs;
+    this._wallFoldedThroughMs = Math.max(this._wallFoldedThroughMs, startMs);
+    this._dirty = true;
+    return true;
+  }
+
+  /**
+   * Remove every wall figure: the per-node and per-month wall fields, the months and nodes
+   * that held nothing else, and the wall boundary and watermarks. The estimate is untouched.
+   * @returns {number} months that held wall figures
+   */
+  dropWall() {
+    let touched = 0;
+    for (const [key, month] of this._months) {
+      let had = false;
+      for (const k of MONTH_WALL_KEYS) {
+        if (k in month) {
+          delete month[k];
+          had = true;
+        }
+      }
+      for (const [id, node] of Object.entries(month.nodes)) {
+        for (const k of NODE_WALL_KEYS) {
+          if (k in node) {
+            delete node[k];
+            had = true;
+          }
+        }
+        if (Object.keys(node).every((k) => k === "wh" || k === "coverageMs") && !node.wh && !node.coverageMs) delete month.nodes[id];
+      }
+      if (had) touched += 1;
+      const empty =
+        Object.keys(month.nodes).length === 0 &&
+        ["fleetWh", "fleetCoverageMs", "outputTokens", "coveredOutputTokens", "tokenFleetWh"].every((k) => !month[k]);
+      if (empty) this._months.delete(key);
+    }
+    this._wallFoldedThroughMs = 0;
+    this._wallStartMs = null;
+    this._wallImportedFromMs = {};
+    this._dirty = true;
+    return touched;
   }
 
   /** Start (ms) of the first minute that is no longer open to late writes at `nowMs`. */
@@ -203,20 +254,19 @@ export class MonthlyEnergyArchive {
     buckets,
     { nowMs = this._now(), settledBeforeMs = -Infinity, nodeIds = [], wallNodeIds = nodeIds, ratios = null, trackedSinceMs = null } = {}
   ) {
-    if (!Number.isFinite(nowMs) || nodeIds.length === 0 || wallNodeIds.length === 0) return 0;
+    if (!Number.isFinite(nowMs) || nodeIds.length === 0 || wallNodeIds.length === 0 || this._wallStartMs === null) return 0;
     const cap = MonthlyEnergyArchive.closedBefore(this._now() + MAX_AHEAD_MS);
     const settled = Number.isFinite(settledBeforeMs)
       ? Math.floor(settledBeforeMs / MINUTE_MS) * MINUTE_MS
       : settledBeforeMs === Infinity ? Infinity : -Infinity;
     const boundary = Math.min(MonthlyEnergyArchive.closedBefore(nowMs), settled, cap);
     if (this._wallFoldedThroughMs > cap) {
-      this._wallFoldedThroughMs = Math.max(0, Math.min(boundary, MonthlyEnergyArchive.closedBefore(nowMs)));
+      this._wallFoldedThroughMs = Math.max(this._wallStartMs, Math.min(boundary, MonthlyEnergyArchive.closedBefore(nowMs)));
       this._dirty = true;
     }
     if (!(boundary > this._wallFoldedThroughMs)) return 0;
     const metered = new Set(wallNodeIds);
     let folded = 0;
-    let earliest = null;
     for (const bucket of buckets ?? []) {
       const start = bucket?.minuteStartMs;
       if (!Number.isSafeInteger(start) || start % MINUTE_MS !== 0) continue;
@@ -246,33 +296,36 @@ export class MonthlyEnergyArchive {
       }
       this._months.set(key, month);
       folded += 1;
-      if (earliest === null || start < earliest) earliest = start;
     }
     if (folded > 0) {
       this._wallFoldedThroughMs = boundary === Infinity ? MonthlyEnergyArchive.closedBefore(nowMs) : boundary;
-      if (this._wallFoldedFromMs === null || earliest < this._wallFoldedFromMs) this._wallFoldedFromMs = earliest;
       this._dirty = true;
     }
     return folded;
   }
 
   /**
-   * Import a meter's hourly history older than anything folded or imported before for each
-   * node: hours ending at or before `beforeMs` and before the node's earlier imports. Hours
-   * every node in `fleetNodeIds` reported in this call also count toward the fleet figures.
+   * Import a meter's hourly history for each node: hours ending at or before `beforeMs` (and
+   * never after the wall boundary, from which minutes fold instead) and before the node's
+   * earlier imports, each hour once. Hours every node in `fleetNodeIds` reported in this
+   * call also count toward the fleet figures.
    * @param {Map<string, Array<{ startMs: number, endMs: number, meanW: number }>>} periodsByNode
    * @returns {number} node-hours added
    */
   importWallHours(periodsByNode, { nodeIds = [...periodsByNode.keys()], fleetNodeIds = nodeIds, beforeMs } = {}) {
     if (!Number.isFinite(beforeMs)) return 0;
+    const before = Math.min(beforeMs, this._wallStartMs ?? beforeMs);
     const byHour = new Map();
     let imported = 0;
     for (const id of nodeIds) {
-      const limit = Math.min(beforeMs, this._wallImportedFromMs[id] ?? beforeMs);
+      const previous = this._wallImportedFromMs[id];
+      const limit = Math.min(before, previous ?? before);
+      const seen = new Set();
       let earliest = null;
       for (const p of periodsByNode.get(id) ?? []) {
         if (p?.endMs - p?.startMs !== HOUR_MS || p.startMs % HOUR_MS !== 0 || p.endMs > limit) continue;
-        if (!Number.isFinite(p.meanW) || p.meanW < 0) continue;
+        if (!Number.isFinite(p.meanW) || p.meanW < 0 || seen.has(p.startMs)) continue;
+        seen.add(p.startMs);
         const wh = p.meanW;
         const month = this._months.get(monthKey(p.startMs)) ?? emptyMonth();
         const node = (month.nodes[id] ??= { wh: 0, coverageMs: 0 });
@@ -287,6 +340,7 @@ export class MonthlyEnergyArchive {
         if (earliest === null || p.startMs < earliest) earliest = p.startMs;
       }
       this._wallImportedFromMs[id] = earliest === null ? limit : Math.min(limit, earliest);
+      if (this._wallImportedFromMs[id] !== previous) this._dirty = true;
     }
     if (fleetNodeIds.length > 0 && fleetNodeIds.every((id) => nodeIds.includes(id))) {
       for (const [start, hour] of byHour) {
@@ -296,7 +350,7 @@ export class MonthlyEnergyArchive {
         addTo(month, "fleetWallCoverageMs", HOUR_MS);
       }
     }
-    this._dirty = true;
+    if (imported > 0) this._dirty = true;
     return imported;
   }
 
@@ -371,9 +425,9 @@ export class MonthlyEnergyArchive {
     if (!this.filePath || !this._dirty || this._persistDisabled) return false;
     const months = Object.fromEntries([...this._months.entries()].sort(([a], [b]) => (a < b ? -1 : 1)));
     const state = { version: FILE_VERSION, savedAt: this._now(), foldedThroughMs: this._foldedThroughMs, months };
-    if (this._wallFoldedThroughMs > 0 || Object.keys(this._wallImportedFromMs).length > 0) {
+    if (this._wallStartMs !== null || Object.keys(this._wallImportedFromMs).length > 0) {
+      state.wallStartMs = this._wallStartMs;
       state.wallFoldedThroughMs = this._wallFoldedThroughMs;
-      state.wallFoldedFromMs = this._wallFoldedFromMs;
       state.wallImportedFromMs = this._wallImportedFromMs;
     }
     this._writeState(this.filePath, `${JSON.stringify(state)}\n`, this._fs);
@@ -412,7 +466,10 @@ export class MonthlyEnergyArchive {
       const cap = MonthlyEnergyArchive.closedBefore(this._now() + MAX_AHEAD_MS);
       this._wallFoldedThroughMs = Math.min(raw.wallFoldedThroughMs, cap);
     }
-    if (Number.isSafeInteger(raw.wallFoldedFromMs) && raw.wallFoldedFromMs >= 0) this._wallFoldedFromMs = raw.wallFoldedFromMs;
+    if (Number.isSafeInteger(raw.wallStartMs) && raw.wallStartMs >= 0 && raw.wallStartMs % (60 * MINUTE_MS) === 0) {
+      this._wallStartMs = raw.wallStartMs;
+      this._wallFoldedThroughMs = Math.max(this._wallFoldedThroughMs, raw.wallStartMs);
+    }
     if (raw.wallImportedFromMs && typeof raw.wallImportedFromMs === "object") {
       for (const [id, ms] of Object.entries(raw.wallImportedFromMs)) {
         if (Number.isSafeInteger(ms) && ms >= 0) this._wallImportedFromMs[id] = ms;

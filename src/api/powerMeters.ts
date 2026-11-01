@@ -54,6 +54,8 @@ export type PowerMeterStatus =
       pollIntervalMs: number;
       staleAfterMs: number;
       history: { enabled: boolean; backfillDays: number };
+      /** Wall minutes begin here; the meter's history before it is in Monthly as hourly totals. */
+      wallStartMs: number | null;
       meters: PowerMeterMeterStatus[];
       units: PowerMeterUnitStatus[];
     };

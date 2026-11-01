@@ -9,11 +9,14 @@
  *    The tracker's 2 s energy sampler reads the cached result through `wallReadings()`.
  *  - History: for meters that keep it, a pass 45 s after every 5-minute boundary writes the
  *    meter's own 5-minute (and once an hour, hourly) figures over the live minutes. The first
- *    pass backfills: the tracker's 31-day window minute by minute, anything older straight
- *    into the monthly archive, back to each unit's `since`.
+ *    pass backfills: the last day (from the tracker's wall boundary) as minutes, like every
+ *    later pass, and everything before the boundary straight into the monthly archive as
+ *    hourly totals, back to each unit's `since`. Minutes before the boundary never get
+ *    meter figures.
  *  - Settling: the monthly archive folds a wall minute only once the meter has confirmed it
  *    (or it is an hour old), so a minute is counted once, with the meter's figure.
  */
+import { WALL_BACKFILL_MS } from "../energy/FleetEnergyTracker.js";
 import { loadPowerMeterConfig } from "./config.js";
 import { PowerMeterProvider, createProvider, providerClass } from "./providers/index.js";
 import { registerPowerMeterRoutes } from "./routes.js";
@@ -253,8 +256,8 @@ export function createPowerMeterRuntime({
     }
   }
 
-  /** Fetch one range; minutes in the tracker's window are overwritten, older hours collected. */
-  async function fetchRange(meter, meterUnits, period, fromMs, toMs, older, onChunk) {
+  /** Fetch [fromMs, toMs) in chunks; `use(unit, periods)` gets each unit's periods from its `since` on. */
+  async function fetchRange(meter, meterUnits, period, fromMs, toMs, use, onChunk) {
     const step = period === "5minute" ? FIVE_MINUTES_MS : HOUR_MS;
     for (let a = floorTo(fromMs, step); a < toMs && !stopped; a += CHUNK_MS[period]) {
       const b = Math.min(toMs, a + CHUNK_MS[period]);
@@ -262,16 +265,26 @@ export function createPowerMeterRuntime({
         meterUnits.map((u) => u.channel),
         { fromMs: a, toMs: b, period, signal: AbortSignal.any([lifecycle.signal, AbortSignal.timeout(HISTORY_REQUEST_TIMEOUT_MS)]) }
       );
-      const windowStart = tracker.windowStartMs(now());
       for (const unit of meterUnits) {
-        const periods = (history?.get?.(unit.channel) ?? []).filter((p) => unit.sinceMs == null || p.startMs >= unit.sinceMs);
-        tracker.applyWallPeriods(unit.id, periods.filter((p) => p.startMs >= windowStart), { sinceMs: unit.sinceMs });
-        if (older) older.get(unit.id).push(...periods.filter((p) => p.endMs <= windowStart));
-        const end = periods.reduce((max, p) => Math.max(max, p.endMs), -Infinity);
-        if (Number.isFinite(end) && end > (mark(unit, period) ?? -Infinity)) saveState(unit, { marks: { [period]: end } });
+        use(unit, (history?.get?.(unit.channel) ?? []).filter((p) => unit.sinceMs == null || p.startMs >= unit.sinceMs));
       }
       onChunk?.(b);
     }
+  }
+
+  /** Write periods over the unit's wall minutes and remember how far the record reaches. */
+  function toMinutes(unit, period, periods) {
+    tracker.applyWallPeriods(unit.id, periods, { sinceMs: unit.sinceMs });
+    const end = periods.reduce((max, p) => Math.max(max, p.endMs), -Infinity);
+    if (Number.isFinite(end) && end > (mark(unit, period) ?? -Infinity)) saveState(unit, { marks: { [period]: end } });
+  }
+
+  /** Minutes from `fromMs`, never before the wall boundary or the tracker's window. */
+  async function fetchMinutes(meter, meterUnits, period, fromMs, toMs) {
+    if (!meter.provider.historyPeriods.includes(period)) return;
+    const from = Math.max(fromMs, tracker.windowStartMs(toMs), tracker.wallStartMs ?? toMs);
+    if (from >= toMs) return;
+    await fetchRange(meter, meterUnits, period, from, toMs, (unit, periods) => toMinutes(unit, period, periods));
   }
 
   async function backfill(meter, meterUnits) {
@@ -283,18 +296,21 @@ export function createPowerMeterRuntime({
     meter.history.state = "backfilling";
     meter.history.backfill = { fromMs, throughMs: fromMs, startedAt: t };
     logger.log?.(`[powerMeters] backfilling ${pending.map((u) => u.id).join(", ")} from meter ${meter.id} since ${new Date(fromMs).toISOString()}`);
-    const older = new Map(pending.map((u) => [u.id, []]));
-    const periods = meter.provider.historyPeriods;
-    if (periods.includes("hour")) {
-      await fetchRange(meter, pending, "hour", fromMs, t, older, (through) => {
+    // Before the wall boundary: hourly totals straight into the monthly archive.
+    const startMs = tracker.wallStartMs;
+    if (meter.provider.historyPeriods.includes("hour") && startMs !== null && fromMs < startMs) {
+      const older = new Map(pending.map((u) => [u.id, []]));
+      await fetchRange(meter, pending, "hour", fromMs, startMs, (unit, periods) => older.get(unit.id).push(...periods), (through) => {
         meter.history.backfill.throughMs = through;
       });
+      if (stopped) return;
+      tracker.importWallHistory(older);
     }
-    if (periods.includes("5minute")) {
-      await fetchRange(meter, pending, "5minute", Math.max(fromMs, tracker.windowStartMs(t)), t, null);
-    }
+    // The last day as minutes, hourly first so the 5-minute figures replace it. A unit metered
+    // later than the others gets the same day; its time before that stays filled.
+    const recentFromMs = Math.max(fromMs, floorTo(t - WALL_BACKFILL_MS, HOUR_MS));
+    for (const period of ["hour", "5minute"]) await fetchMinutes(meter, pending, period, recentFromMs, t);
     if (stopped) return;
-    tracker.importWallHistory(older);
     for (const unit of pending) saveState(unit, { backfill: unit.backfillKey });
     meter.history.backfill = { ...meter.history.backfill, throughMs: t, doneAt: now() };
     const days = Math.round((t - fromMs) / DAY_MS);
@@ -305,13 +321,12 @@ export function createPowerMeterRuntime({
   async function catchUp(meter, meterUnits, period, { initial }) {
     if (!meter.provider.historyPeriods.includes(period)) return;
     const t = now();
-    const windowStart = tracker.windowStartMs(t);
     let fromMs = t - LOOKBACK_MS[period];
     if (initial) {
       // After downtime, continue from the oldest confirmed period.
       for (const unit of meterUnits) fromMs = Math.min(fromMs, mark(unit, period) ?? fromMs);
     }
-    await fetchRange(meter, meterUnits, period, Math.max(fromMs, windowStart), t, null);
+    await fetchMinutes(meter, meterUnits, period, fromMs, t);
   }
 
   async function reconcileMeter(meter) {
@@ -375,6 +390,7 @@ export function createPowerMeterRuntime({
       pollIntervalMs: cfg.pollIntervalMs,
       staleAfterMs: cfg.staleAfterMs,
       history: { ...cfg.history },
+      wallStartMs: tracker.wallStartMs,
       meters: [...meters.values()].map((m) => ({
         id: m.id,
         type: m.type,

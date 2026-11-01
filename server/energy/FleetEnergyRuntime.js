@@ -97,6 +97,14 @@ export function registerFleetEnergyRoute(app, tracker) {
     }
     return res.json({ removed: tracker.clear({ olderThanMs }) });
   });
+  // Remove every recorded wall-power figure (minutes and months); the estimate is kept. Meters
+  // that are still configured start recording again with a new boundary.
+  app.delete("/api/fleet-energy/wall", (req, res) => {
+    if (req.query?.confirm !== "delete-wall-power") {
+      return res.status(400).json({ error: "dropping recorded wall power needs confirm=delete-wall-power" });
+    }
+    return res.json(tracker.dropWall());
+  });
   // Permanent monthly roll-up. Survives the resets above; clearing it is a separate, explicit call.
   app.get("/api/fleet-energy/monthly", (_req, res) => res.json(tracker.monthlySnapshot()));
   // Query: month=YYYY-MM (one month) or all=true&confirm=delete-all-history (everything). One is required.

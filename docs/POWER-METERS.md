@@ -67,7 +67,7 @@ The file holds no credentials. A meter that needs one names the environment vari
 carries it. An invalid file keeps the feature off, logs the reason and shows it on the Energy
 page. Restart sparkDash after editing the file. If a unit's channel or meter changes, its wall
 minutes in the 31-day window came from another outlet and are dropped; Monthly keeps what was
-already archived, and a meter with history backfills the window again.
+already archived, and a meter with history loads the last day again.
 
 ### Home Assistant
 
@@ -96,15 +96,32 @@ every 2 s, integrates the latest fresh reading into the same minute buckets as t
 hour it also fetches hourly statistics, which fill minutes no 5-minute figure confirmed. Live
 readings never overwrite a confirmed minute.
 
-**Backfill.** On the first start the window's 31 days are filled minute by minute from the
-meter's record. Hourly history older than the window goes straight into the monthly archive,
-back to each unit's `since` (at most `history.backfillDays`). An import mark per unit stops
-that history from being counted twice. After downtime, the first pass continues from where the
-last one stopped.
+**One boundary.** When meters are first configured, wall power gets a fixed boundary: the start
+of the hour one day earlier (`wallStartMs`, kept in the monthly archive). Every hour of a
+meter's record is counted on exactly one side of it:
+
+- *Before the boundary*, the meter's hourly statistics go straight into the monthly archive as
+  hourly totals, back to each unit's `since` (at most `history.backfillDays`). They never become
+  minutes. An import mark per unit stops an hour from being imported twice.
+- *From the boundary on*, wall power lives in minutes: the first pass loads the last day from
+  the meter's 5-minute statistics (the same step every later pass repeats over its 6-hour
+  lookback), then live readings and the passes above take over. Monthly folds these minutes.
+
+So the backfill writes at most a day of minutes, and nothing in the 31-day window before the
+boundary is rewritten: those minutes keep the estimate only, and the Energy page fills them
+(see below) until they age out. A unit metered later than the others is imported up to the
+boundary and recorded in minutes from its own start; the time in between stays filled. After
+downtime, the first pass continues from where the last one stopped, inside the window.
 
 **Monthly archive.** Wall minutes are folded into their month only once the meter has
 confirmed them, or after an hour if the meter cannot be reached. A minute is counted once, and
 with the meter's figure where there is one. GPU and CPU parts fold with the estimate.
+
+**Starting over.** `DELETE /api/fleet-energy/wall?confirm=delete-wall-power` removes every
+wall figure: the minutes' wall entries, the months' wall fields (and months that held nothing
+else), the boundary and the meter bookkeeping. The estimate and its GPU/CPU parts stay. With
+meters still configured, recording starts again with a new boundary and the next pass reloads
+the meter's history.
 
 **Gaps are filled from the estimate.** Where no meter measured (a gap in the meter, or a unit
 with no meter), wall power is filled as estimate × a ratio learned per unit: measured wall ÷
@@ -115,10 +132,10 @@ energy is kept apart from measured energy in every payload (`…FilledWh`/`…Fi
 page says how much of a range was filled. Time neither the meter nor the estimate covered is
 left out.
 
-**On disk.** Minutes that only hold wall data (a backfill) are stored without the estimate's
-empty fields, and the new fields are rounded to a microwatt-hour. `fleet-energy.json` is rewritten
-in full at most hourly and on shutdown; every 30 s only the minutes changed since then go to
-`fleet-energy.recent.json`, which loading merges back in.
+**On disk.** Minutes that only hold wall data (time sparkDash was not running) are stored
+without the estimate's empty fields, and the new fields are rounded to a microwatt-hour.
+`fleet-energy.json` is rewritten in full at most hourly and on shutdown; every 30 s only the
+minutes changed since then go to `fleet-energy.recent.json`, which loading merges back in.
 
 Coverage and efficiency follow the estimate's rules. Per-unit figures count while that unit was
 covered, fleet figures only while every unit was. Wh per token counts minutes the whole fleet
@@ -153,8 +170,10 @@ node. Both start when sparkDash is upgraded; earlier history has no parts.
 |--------|------|---------|
 | GET | `/api/power-meters` | `enabled`, `state` (`absent`, `disabled`, `invalid` with `error`, or `ok`), each meter's type, display target, health and history state, and each unit's current reading |
 | POST | `/api/power-meters/reconcile` | Runs a history pass now; returns the status |
+| DELETE | `/api/fleet-energy/wall?confirm=delete-wall-power` | Removes all recorded wall power, minutes and months; returns `{ minutes, months }` touched |
 
-Both sit behind the dashboard's authentication like the rest of the API.
+All sit behind the dashboard's authentication like the rest of the API. The status also carries
+`wallStartMs`, the boundary above.
 
 ## Adding a provider
 

@@ -328,18 +328,122 @@ test("older meter history is imported into months once, with fleet totals", (t) 
   assert.equal(reloaded.importWallHours(byNode, { nodeIds: ["a", "b"], beforeMs: sep + 10 * HOUR }), 0, "the import mark persists");
 });
 
-test("the tracker imports only history older than its window", () => {
-  const { tracker } = makeTracker();
+// ─── The wall boundary ──────────────────────────────────────────────────
+
+test("configuring wall power fixes one boundary: hours before it are imported, minutes from it on recorded", () => {
+  const { tracker, setNow } = makeTracker();
   tracker.configureWall({ nodeIds: ["a", "b"] });
-  const windowStart = tracker.windowStartMs();
+  const start = tracker.wallStartMs;
+  assert.equal(start, T0 - DAY, "the hour a day before the meters were configured");
+  setNow(T0 + 3 * HOUR);
+  tracker.configureWall({ nodeIds: ["a", "b"] });
+  assert.equal(tracker.wallStartMs, start, "later starts keep it");
   const p = (startMs) => ({ startMs, endMs: startMs + HOUR, meanW: 10 });
+  assert.equal(tracker.applyWallPeriods("a", [p(start - HOUR), p(start)]), 1, "minutes never take figures from before it");
   const imported = tracker.importWallHistory(
     new Map([
-      ["a", [p(windowStart - 2 * HOUR), p(windowStart - HOUR), p(windowStart)]],
-      ["x", [p(windowStart - 2 * HOUR)]],
+      ["a", [p(start - 2 * HOUR), p(start - HOUR), p(start)]],
+      ["x", [p(start - HOUR)]],
     ])
   );
-  assert.equal(imported, 2);
+  assert.equal(imported, 2, "months never take hours from after it (nor units without a meter)");
+});
+
+test("every hour of the meter's record reaches Monthly exactly once, however often it is fetched", (t) => {
+  const dir = tempDir(t);
+  const files = { filePath: path.join(dir, "fleet-energy.json"), monthlyFilePath: path.join(dir, "fleet-energy-monthly.json") };
+  const { tracker, setNow } = makeTracker(files);
+  tracker.configureWall({ nodeIds: ["a", "b"] });
+  const start = tracker.wallStartMs;
+  const hours = (from, n, meanW) => Array.from({ length: n }, (_, i) => ({ startMs: from + i * HOUR, endMs: from + (i + 1) * HOUR, meanW }));
+  const before = hours(start - 6 * HOUR, 6, 60);
+  const after = hours(start, 6, 60);
+  for (let pass = 0; pass < 3; pass += 1) {
+    tracker.importWallHistory(new Map([["a", [...before, ...after]], ["b", [...before, ...after]]]));
+    tracker.applyWallPeriods("a", [...before, ...after]);
+    tracker.applyWallPeriods("b", [...before, ...after]);
+  }
+  tracker.close();
+  // A restart fetches it all again.
+  setNow(T0 + HOUR);
+  const { tracker: again } = makeTracker({ ...files, now: T0 + HOUR });
+  again.configureWall({ nodeIds: ["a", "b"] });
+  again.importWallHistory(new Map([["a", [...before, ...after]], ["b", [...before, ...after]]]));
+  again.applyWallPeriods("a", after);
+  again.applyWallPeriods("b", after);
+  const [month] = again.monthlySnapshot(T0 + HOUR).months;
+  close(month.nodes.a.wallWh, 12 * 60, 1e-6);
+  close(month.nodes.b.wallWh, 12 * 60, 1e-6);
+  assert.equal(month.nodes.a.wallCoverageMs, 12 * HOUR);
+  close(month.fleetWallWh, 2 * 12 * 60, 1e-6);
+  assert.equal(month.fleetWallCoverageMs, 12 * HOUR);
+});
+
+test("an hour listed twice in one import counts once", () => {
+  const archive = new MonthlyEnergyArchive({ now: () => T0 });
+  const hour = { startMs: T0 - 5 * HOUR, endMs: T0 - 4 * HOUR, meanW: 60 };
+  assert.equal(archive.importWallHours(new Map([["a", [hour, { ...hour }]]]), { nodeIds: ["a"], beforeMs: T0 }), 1);
+  assert.equal(archive.snapshot(T0).months[0].nodes.a.wallWh, 60);
+});
+
+// ─── Dropping wall power ────────────────────────────────────────────────
+
+test("dropWall removes every wall figure, keeps the estimate, and starts over", (t) => {
+  const dir = tempDir(t);
+  const files = { filePath: path.join(dir, "fleet-energy.json"), monthlyFilePath: path.join(dir, "fleet-energy-monthly.json") };
+  const { tracker, setNow } = makeTracker(files);
+  tracker.configureWall({ nodeIds: ["a", "b"] });
+  // A month that only exists through imported history, a live hour, and a meter record.
+  const aug = Date.parse("2026-08-14T00:00:00Z");
+  tracker.importWallHistory(new Map([["a", [{ startMs: aug, endMs: aug + HOUR, meanW: 80 }]]]));
+  feed(tracker, setNow, T0, T0 + HOUR, () => [snap("a", { wallWatts: 120 }), snap("b", { wallWatts: 100 })]);
+  tracker.applyWallPeriods("a", [{ startMs: T0 - 2 * HOUR, endMs: T0 - HOUR, meanW: 90 }]);
+  tracker.setWallState("a", { key: "k", marks: { "5minute": T0 }, backfill: "k" });
+  setNow(T0 + 2 * HOUR);
+  const strip = (rows) => rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !/wall/i.test(k))));
+  const estimateRows = strip(tracker.history(T0 + 2 * HOUR).hourly.filter((r) => r.nodeCoverageMs.a > 0));
+  const octBefore = tracker.monthlySnapshot(T0 + 2 * HOUR).months.find((m) => m.month === "2026-10");
+
+  const result = tracker.dropWall();
+  assert.ok(result.minutes > 60 && result.months === 2, JSON.stringify(result));
+  assert.equal(tracker.wallState("a"), null);
+  assert.equal(tracker.wallStartMs, Math.floor((T0 + 2 * HOUR - DAY) / HOUR) * HOUR, "a new boundary from now");
+  const check = (tr) => {
+    const rows = tr.history(T0 + 2 * HOUR).hourly;
+    assert.ok(rows.every((r) => r.nodeWallWh === undefined || Object.values(r.nodeWallWh).every((v) => v === 0)));
+    assert.deepEqual(strip(rows.filter((r) => r.nodeCoverageMs.a > 0)), estimateRows, "the estimate rows are unchanged");
+    const months = tr.monthlySnapshot(T0 + 2 * HOUR).months;
+    assert.deepEqual(months.map((m) => m.month), ["2026-10"], "the month that only held wall power is gone");
+    const [oct] = months;
+    assert.equal(oct.totalWallWh, undefined);
+    assert.equal(Object.values(oct.nodes).some((n) => "wallWh" in n), false);
+    assert.equal(oct.totalWh, octBefore.totalWh);
+    assert.deepEqual(oct.nodes.a.gpuWh, octBefore.nodes.a.gpuWh, "the GPU/CPU parts stay");
+  };
+  check(tracker);
+  // It is on disk too, and nothing comes back on a restart.
+  tracker.close();
+  const { tracker: reloaded } = makeTracker({ ...files, now: T0 + 2 * HOUR });
+  reloaded.configureWall({ nodeIds: ["a", "b"] });
+  check(reloaded);
+});
+
+test("DELETE /api/fleet-energy/wall needs an explicit confirmation", async (t) => {
+  const { default: express } = await import("express");
+  const { registerFleetEnergyRoute } = await import("../../energy/FleetEnergyRuntime.js");
+  let dropped = 0;
+  const app = express();
+  registerFleetEnergyRoute(app, { dropWall: () => ((dropped += 1), { minutes: 3, months: 1 }) });
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/api/fleet-energy/wall`;
+  assert.equal((await fetch(url, { method: "DELETE" })).status, 400);
+  assert.equal(dropped, 0);
+  const ok = await fetch(`${url}?confirm=delete-wall-power`, { method: "DELETE" });
+  assert.deepEqual(await ok.json(), { minutes: 3, months: 1 });
+  assert.equal(dropped, 1);
 });
 
 // ─── Cached sums ────────────────────────────────────────────────────────

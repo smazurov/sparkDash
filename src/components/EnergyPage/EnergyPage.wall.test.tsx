@@ -124,6 +124,7 @@ const status: PowerMeterStatus = {
   pollIntervalMs: 10_000,
   staleAfterMs: 30_000,
   history: { enabled: true, backfillDays: 400 },
+  wallStartMs: null,
   meters: [
     {
       id: "ha",
