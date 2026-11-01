@@ -88,27 +88,30 @@ export function wallMinute(bucket, nodeIds, wallNodeIds, ratios) {
  */
 export function wallHour(buckets, nodeIds, wallNodeIds, ratios, hourWh) {
   const nodes = {};
-  for (const id of nodeIds) nodes[id] = { wh: 0, coverageMs: 0, meteredMs: 0, filledWh: 0, filledMs: 0 };
+  const unmeasured = [];
+  for (const id of nodeIds) {
+    const measured = wallNodeIds.has(id) ? hourWh?.get(id) : undefined;
+    if (Number.isFinite(measured)) {
+      nodes[id] = { wh: measured, coverageMs: HOUR_MS, meteredMs: HOUR_MS, filledWh: 0, filledMs: 0 };
+    } else {
+      nodes[id] = { wh: 0, coverageMs: 0, meteredMs: 0, filledWh: 0, filledMs: 0 };
+      unmeasured.push(id);
+    }
+  }
+  // Only nodes without the meter's figure are filled from the minutes (a node's fill depends
+  // on its own minutes alone); when every node has one, the minutes only count tokens.
   let outputTokens = 0;
   for (const bucket of buckets) {
     outputTokens += bucket.outputTokens ?? 0;
-    const minute = wallMinute(bucket, nodeIds, wallNodeIds, ratios);
+    if (unmeasured.length === 0) continue;
+    const minute = wallMinute(bucket, unmeasured, wallNodeIds, ratios);
     if (!minute) continue;
-    for (const id of nodeIds) {
+    for (const id of unmeasured) {
       nodes[id].filledWh += minute.nodes[id].filledWh;
       nodes[id].filledMs += minute.nodes[id].filledMs;
     }
   }
-  let any = false;
-  for (const id of nodeIds) {
-    const n = nodes[id];
-    const measured = wallNodeIds.has(id) ? hourWh?.get(id) : undefined;
-    if (Number.isFinite(measured)) {
-      Object.assign(n, { wh: measured, coverageMs: HOUR_MS, meteredMs: HOUR_MS, filledWh: 0, filledMs: 0 });
-    }
-    if (n.coverageMs > 0 || n.filledMs > 0) any = true;
-  }
-  if (!any) return null;
+  if (!nodeIds.some((id) => nodes[id].coverageMs > 0 || nodes[id].filledMs > 0)) return null;
   let fleet = null;
   const covered = nodeIds.map((id) => Math.min(HOUR_MS, nodes[id].coverageMs + nodes[id].filledMs));
   if (nodeIds.length > 0 && covered.every((ms) => ms > 0)) {

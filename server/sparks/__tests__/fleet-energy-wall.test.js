@@ -402,6 +402,9 @@ test("wallHour: a metered node's hourly figure stands for the whole hour; others
   assert.equal(half.fleet.coverageMs, 30 * MINUTE);
   close(half.fleet.wh, 100 / 2 + 30);
   assert.equal(half.fleet.full, false);
+  // Every node measured: the minutes add nothing but their tokens.
+  const both = wallHour(buckets, ids, metered, ratios, new Map([["a", 100], ["b", 50]]));
+  assert.deepEqual([both.nodes.b.wh, both.nodes.b.filledWh, both.fleet.wh, both.fleet.filledWh, both.outputTokens], [50, 0, 150, 0, 120]);
   // An unmetered node's figure is ignored; nothing at all gives null.
   assert.equal(wallHour([], ids, new Set(["b"]), ratios, new Map([["a", 100]])), null);
 });
