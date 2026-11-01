@@ -12,7 +12,8 @@
  */
 
 const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 /** Minutes of full overlap a node needs before its own ratio is trusted. */
 export const MIN_RATIO_MINUTES = 60;
 export const RATIO_WINDOW_MS = 7 * DAY_MS;
@@ -68,6 +69,59 @@ export function wallMinute(bucket, nodeIds, wallNodeIds, ratios) {
     fleet = { coverageMs: common, wh, filledWh, full: common >= FULL_MINUTE_MS };
   }
   return { nodes, fleet };
+}
+
+/**
+ * Wall power for one clock hour before the wall boundary, where the meter's record is an
+ * hourly figure rather than minutes (see FleetEnergyTracker.importWallHistory). A metered node
+ * with an hourly figure is measured for the whole hour, and its minutes add nothing; a node
+ * without one is filled from its minutes' estimate, exactly as wallMinute fills it. The fleet
+ * figure uses the shortest coverage, pro rata, like wallMinute's, and an hour counts as full
+ * when it misses less than a minute.
+ *
+ * @param {Iterable<object>} buckets         the hour's minute buckets (may be empty)
+ * @param {string[]} nodeIds
+ * @param {ReadonlySet<string>} wallNodeIds
+ * @param {Map<string, number> | null} ratios
+ * @param {Map<string, number>} hourWh       metered node → the meter's Wh for the hour
+ * @returns {{ nodes: Record<string, object>, fleet: object | null, outputTokens: number } | null}
+ */
+export function wallHour(buckets, nodeIds, wallNodeIds, ratios, hourWh) {
+  const nodes = {};
+  for (const id of nodeIds) nodes[id] = { wh: 0, coverageMs: 0, meteredMs: 0, filledWh: 0, filledMs: 0 };
+  let outputTokens = 0;
+  for (const bucket of buckets) {
+    outputTokens += bucket.outputTokens ?? 0;
+    const minute = wallMinute(bucket, nodeIds, wallNodeIds, ratios);
+    if (!minute) continue;
+    for (const id of nodeIds) {
+      nodes[id].filledWh += minute.nodes[id].filledWh;
+      nodes[id].filledMs += minute.nodes[id].filledMs;
+    }
+  }
+  let any = false;
+  for (const id of nodeIds) {
+    const n = nodes[id];
+    const measured = wallNodeIds.has(id) ? hourWh?.get(id) : undefined;
+    if (Number.isFinite(measured)) {
+      Object.assign(n, { wh: measured, coverageMs: HOUR_MS, meteredMs: HOUR_MS, filledWh: 0, filledMs: 0 });
+    }
+    if (n.coverageMs > 0 || n.filledMs > 0) any = true;
+  }
+  if (!any) return null;
+  let fleet = null;
+  const covered = nodeIds.map((id) => Math.min(HOUR_MS, nodes[id].coverageMs + nodes[id].filledMs));
+  if (nodeIds.length > 0 && covered.every((ms) => ms > 0)) {
+    const common = Math.min(...covered);
+    let wh = 0;
+    let filledWh = 0;
+    nodeIds.forEach((id, i) => {
+      wh += ((nodes[id].wh + nodes[id].filledWh) * common) / covered[i];
+      filledWh += (nodes[id].filledWh * common) / covered[i];
+    });
+    fleet = { coverageMs: common, wh, filledWh, full: common >= HOUR_MS - MINUTE_MS };
+  }
+  return { nodes, fleet, outputTokens };
 }
 
 /**

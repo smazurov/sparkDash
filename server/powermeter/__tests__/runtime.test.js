@@ -187,9 +187,15 @@ test("the first pass backfills: hours before the wall boundary into months, the 
   const minuteCalls = provider.calls.filter((c) => !imports.includes(c));
   assert.ok(minuteCalls.length > 0 && minuteCalls.every((c) => c.fromMs >= start), "minutes are only fetched from the boundary on");
 
-  // Minutes hold the meter's figures from the boundary on, and nothing before it.
+  // Minutes hold the meter's figures from the boundary on. Before it, the views show the
+  // meter's hourly figures: the same 10 hours Monthly imported, measured, nothing filled.
   const rows = tracker.history(at()).hourly;
-  assert.ok(rows.every((r) => r.t >= start));
+  const earlier = rows.filter((r) => r.t < start);
+  assert.equal(earlier.length, 10);
+  for (const r of earlier) {
+    assert.deepEqual([r.nodeWallWh["spark-a"], r.nodeWallMeteredMs["spark-a"], r.nodeWallFilledWh["spark-a"]], [55, HOUR, 0]);
+    assert.deepEqual([r.nodeWallWh["spark-b"], r.fleetWallWh, r.fleetWallCoverageMs], [45, 100, HOUR]);
+  }
   const first = rows.find((r) => r.t === start);
   assert.equal(first.nodeWallWh["spark-a"], 55);
   assert.equal(first.nodeWallMeteredMs["spark-a"], HOUR);
@@ -229,11 +235,13 @@ test("a unit metered after the boundary was fixed is imported only up to it", as
   const minuteCalls = provider.calls.filter((c) => !imports.includes(c));
   assert.ok(minuteCalls.every((c) => c.fromMs >= at() - 2 * DAY - HOUR), JSON.stringify(minuteCalls));
   const metered = tracker.history(at()).hourly.filter((r) => (r.nodeWallWh?.["spark-a"] ?? 0) > 0);
-  assert.equal(metered[0].t, Math.floor((at() - 2 * DAY) / HOUR) * HOUR);
+  const [before, after] = [metered.filter((r) => r.t < early), metered.filter((r) => r.t >= early)];
+  assert.deepEqual(before.map((r) => r.t), [early - 2 * HOUR, early - HOUR], "the views show the hours imported");
+  assert.equal(after[0].t, Math.floor((at() - 2 * DAY) / HOUR) * HOUR);
   // Months: the 2 hours before the boundary, plus the minutes that fold; the time between
   // the boundary and those minutes was never metered and is in neither.
   advance(3 * HOUR);
-  close(monthTotal(tracker, "spark-a", at()), 2 * 60 + metered.length * 60);
+  close(monthTotal(tracker, "spark-a", at()), 2 * 60 + after.length * 60);
 });
 
 test("a failing history keeps live readings and is announced once", async () => {
