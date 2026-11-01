@@ -102,14 +102,19 @@ meter's record is counted on exactly one side of it:
 
 - *Before the boundary*, the meter's hourly statistics go straight into the monthly archive as
   hourly totals, back to each unit's `since` (at most `history.backfillDays`). They never become
-  minutes. An import mark per unit stops an hour from being imported twice.
+  minutes. An import mark per unit stops an hour from being imported twice. The hours inside
+  the 31-day window are also kept as they are (`wallHours` in `fleet-energy.json`, at most 744
+  per unit) for the Energy page's views to read. They are only shown: Monthly already has
+  them, and nothing folds them.
 - *From the boundary on*, wall power lives in minutes: the first pass loads the last day from
   the meter's 5-minute statistics (the same step every later pass repeats over its 6-hour
   lookback), then live readings and the passes above take over. Monthly folds these minutes.
 
 So the backfill writes at most a day of minutes, and nothing in the 31-day window before the
-boundary is rewritten: those minutes keep the estimate only, and the Energy page fills them
-(see below) until they age out. A unit metered later than the others is imported up to the
+boundary is rewritten: those minutes keep the estimate only. For each of those hours the
+views show the meter's hourly figure instead, measured for the whole hour and never filled on
+top, or fill the hour from the estimate (see below) where the meter has no figure. 24 h and
+31 d totals count an hour cut by their edge pro rata. A unit metered later than the others is imported up to the
 boundary and recorded in minutes from its own start; the time in between stays filled. After
 downtime, the first pass continues from where the last one stopped, inside the window.
 
