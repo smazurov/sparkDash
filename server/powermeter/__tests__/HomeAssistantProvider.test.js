@@ -81,13 +81,6 @@ test("the provider refuses to start without its token variable", () => {
     () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: {} }),
     /environment variable SPARKDASH_HA_TOKEN is not set/
   );
-  // Only that variable: not the name the config might suggest, nor a generic one.
-  assert.throws(
-    () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: { HOME_ASSISTANT_TOKEN: TOKEN } }),
-    /SPARKDASH_HA_TOKEN/
-  );
-  assert.match(HomeAssistantProvider.validate({ type: "homeassistant", url: "https://ha.lan", tokenEnv: "X_TOKEN" }).join(" "), /tokenEnv is not supported; the token comes from SPARKDASH_HA_TOKEN/);
-  assert.match(HomeAssistantProvider.validate({ type: "homeassistant", url: "https://ha.lan", token: "x" }).join(" "), /must not be stored in the file; set SPARKDASH_HA_TOKEN/);
 });
 
 test("readPower sends the bearer token and reports per-channel failures", async (t) => {

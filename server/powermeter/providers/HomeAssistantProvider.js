@@ -176,7 +176,6 @@ export class HomeAssistantProvider extends PowerMeterProvider {
     if (url && (url.protocol === "http:" || url.protocol === "https:") && !isAllowedTargetHost(channelHost(url))) {
       problems.push("url host is not allowed (the outbound policy for unit, LLM and alert targets)");
     }
-    if ("tokenEnv" in spec) problems.push(`tokenEnv is not supported; the token comes from ${TOKEN_ENV}`);
     if ("token" in spec) problems.push(`token must not be stored in the file; set ${TOKEN_ENV}`);
     if (spec.timeoutMs !== undefined && (!Number.isInteger(spec.timeoutMs) || spec.timeoutMs < 500 || spec.timeoutMs > 60_000)) {
       problems.push("timeoutMs must be an integer from 500 to 60000");
