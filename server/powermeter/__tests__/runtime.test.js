@@ -268,7 +268,7 @@ test("a meter without history settles at once and stays live-only", async () => 
 test("a meter that cannot start marks its units without stopping the runtime", async () => {
   const { runtime } = harness({
     createProviderFn: () => {
-      throw new Error("environment variable HOME_ASSISTANT_TOKEN is not set");
+      throw new Error("environment variable SPARKDASH_HA_TOKEN is not set");
     },
   });
   await runtime.pollOnce();
@@ -276,8 +276,8 @@ test("a meter that cannot start marks its units without stopping the runtime", a
   const status = runtime.status();
   assert.equal(status.meters[0].health, "unavailable");
   assert.equal(status.meters[0].label, "Home Assistant", "a meter that could not start is still named by its provider");
-  assert.match(status.meters[0].error, /HOME_ASSISTANT_TOKEN/);
-  assert.equal(status.units[0].error, "environment variable HOME_ASSISTANT_TOKEN is not set");
+  assert.match(status.meters[0].error, /SPARKDASH_HA_TOKEN/);
+  assert.equal(status.units[0].error, "environment variable SPARKDASH_HA_TOKEN is not set");
   assert.deepEqual([...runtime.wallReadings()], []);
 });
 

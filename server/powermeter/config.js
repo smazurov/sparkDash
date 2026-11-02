@@ -3,10 +3,10 @@
  *
  * Opt-in by file. Nothing runs unless `config/power-meters.json` exists (or the file
  * POWER_METERS_CONFIG_PATH names). The file holds no secrets: a meter that needs a
- * credential names the environment variable that carries it (`tokenEnv`).
+ * credential reads it from its own SPARKDASH_ environment variable (SPARKDASH_HA_TOKEN).
  *
  * {
- *   "meters": { "ha": { "type": "homeassistant", "url": "https://ha.lan", "tokenEnv": "HOME_ASSISTANT_TOKEN" } },
+ *   "meters": { "ha": { "type": "homeassistant", "url": "https://ha.lan" } },
  *   "units": {
  *     "spark-a": { "meter": "ha", "channel": "sensor.strip_power_3", "since": "2026-08-13T00:00:00Z" }
  *   }

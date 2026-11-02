@@ -7,9 +7,9 @@
  * API (5-minute rows for the recorder's keep window, about 10 days by default, and hourly
  * rows kept indefinitely), which only exist for sensors with a `state_class`.
  *
- * Config entry: { "type": "homeassistant", "url": "https://ha.lan:8123", "tokenEnv": "HOME_ASSISTANT_TOKEN" }
- * The long-lived access token is read from the named environment variable and never
- * leaves this module. A read-only HA user is enough.
+ * Config entry: { "type": "homeassistant", "url": "https://ha.lan:8123" }
+ * The long-lived access token comes only from the SPARKDASH_HA_TOKEN environment variable,
+ * like SPARKDASH_MQTT_PASSWORD, and never leaves this module. A read-only HA user is enough.
  *
  * Every connection follows the dashboard's outbound policy (server/validate.js), as alert
  * channels do: the host must be an allowed target when the config loads, it is resolved with
@@ -25,8 +25,8 @@ import { assertAllowedTarget, isAllowedTargetHost } from "../../validate.js";
 import { PowerMeterProvider } from "./PowerMeterProvider.js";
 
 const ENTITY_PATTERN = /^[a-z0-9_]+\.[a-z0-9_]+$/;
-const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const DEFAULT_TOKEN_ENV = "HOME_ASSISTANT_TOKEN";
+/** Where the long-lived access token comes from; never the config file. */
+export const TOKEN_ENV = "SPARKDASH_HA_TOKEN";
 const DEFAULT_TIMEOUT_MS = 8_000;
 const HISTORY_TIMEOUT_MS = 60_000;
 /** A state body is about 1 KB. */
@@ -172,14 +172,12 @@ export class HomeAssistantProvider extends PowerMeterProvider {
       problems.push("url must be an absolute http(s) URL");
     }
     if (url && url.protocol !== "http:" && url.protocol !== "https:") problems.push("url must use http or https");
-    if (url && (url.username || url.password)) problems.push("url must not embed credentials; use tokenEnv");
+    if (url && (url.username || url.password)) problems.push(`url must not embed credentials; set ${TOKEN_ENV}`);
     if (url && (url.protocol === "http:" || url.protocol === "https:") && !isAllowedTargetHost(channelHost(url))) {
       problems.push("url host is not allowed (the outbound policy for unit, LLM and alert targets)");
     }
-    if (spec.tokenEnv !== undefined && (typeof spec.tokenEnv !== "string" || !ENV_NAME_PATTERN.test(spec.tokenEnv))) {
-      problems.push("tokenEnv must be an environment variable name");
-    }
-    if ("token" in spec) problems.push("token must not be stored in the file; put it in an environment variable named by tokenEnv");
+    if ("tokenEnv" in spec) problems.push(`tokenEnv is not supported; the token comes from ${TOKEN_ENV}`);
+    if ("token" in spec) problems.push(`token must not be stored in the file; set ${TOKEN_ENV}`);
     if (spec.timeoutMs !== undefined && (!Number.isInteger(spec.timeoutMs) || spec.timeoutMs < 500 || spec.timeoutMs > 60_000)) {
       problems.push("timeoutMs must be an integer from 500 to 60000");
     }
@@ -215,10 +213,9 @@ export class HomeAssistantProvider extends PowerMeterProvider {
     } = {}
   ) {
     super(spec);
-    const tokenEnv = spec.tokenEnv || DEFAULT_TOKEN_ENV;
-    const token = env[tokenEnv];
+    const token = env[TOKEN_ENV];
     if (typeof token !== "string" || token.trim() === "") {
-      throw new Error(`environment variable ${tokenEnv} is not set`);
+      throw new Error(`environment variable ${TOKEN_ENV} is not set`);
     }
     this.#token = token;
     this.#base = String(spec.url).replace(/\/+$/, "");

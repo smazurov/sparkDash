@@ -31,8 +31,7 @@ Create `config/power-meters.json`, or point `POWER_METERS_CONFIG_PATH` at the fi
   "meters": {
     "ha": {
       "type": "homeassistant",
-      "url": "https://homeassistant.local:8123",
-      "tokenEnv": "HOME_ASSISTANT_TOKEN"
+      "url": "https://homeassistant.local:8123"
     }
   },
   "units": {
@@ -63,9 +62,9 @@ Create `config/power-meters.json`, or point `POWER_METERS_CONFIG_PATH` at the fi
 | `history.backfillDays` | How far back the first start backfills, default `400`. |
 | `enabled` | `false` switches the feature off without deleting the file. |
 
-The file holds no credentials. A meter that needs one names the environment variable that
-carries it. An invalid file keeps the feature off, logs the reason and shows it on the Energy
-page. Restart sparkDash after editing the file. If a unit's channel or meter changes, its wall
+The file holds no credentials: a meter that needs one reads it from its own `SPARKDASH_`
+environment variable (`SPARKDASH_HA_TOKEN` for Home Assistant). An invalid file keeps the
+feature off, logs the reason and shows it on the Energy page. Restart sparkDash after editing the file. If a unit's channel or meter changes, its wall
 minutes in the 31-day window came from another outlet and are dropped; Monthly keeps what was
 already archived, and a meter with history loads the last day again.
 
@@ -75,8 +74,10 @@ already archived, and a meter with history loads the last day again.
   outlet's power entity. Its `last_reported` time decides freshness, so a device that stops
   reporting goes stale even while HA still shows its last value. `unavailable`/`unknown` is a
   missing reading, never zero.
-- **Token**: a long-lived access token in the variable `tokenEnv` names (default
-  `HOME_ASSISTANT_TOKEN`). Give sparkDash its own HA user, so the token can be revoked on its own.
+- **Token**: a long-lived access token in the `SPARKDASH_HA_TOKEN` environment variable, like
+  `SPARKDASH_MQTT_PASSWORD`; the docker-compose files pass it through from `.env`. It is never
+  read from the config file, which is rejected if it holds a `token`. Give sparkDash its own HA
+  user, so the token can be revoked on its own.
   The token can do anything that user can, so a read-only user is enough and safer.
 - **History** comes from the recorder's long-term statistics over HA's WebSocket API, so the
   sensor needs a `state_class` (power sensors from integrations normally have

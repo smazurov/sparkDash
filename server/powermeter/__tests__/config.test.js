@@ -6,7 +6,7 @@ import path from "node:path";
 import { loadPowerMeterConfig, validatePowerMeterConfig } from "../config.js";
 
 const valid = () => ({
-  meters: { ha: { type: "homeassistant", url: "https://ha.lan:8123", tokenEnv: "HA_TOKEN" } },
+  meters: { ha: { type: "homeassistant", url: "https://ha.lan:8123" } },
   units: {
     "spark-a": { meter: "ha", channel: "sensor.strip_power_3", since: "2026-08-13T00:00:00Z" },
     "spark-b": { meter: "ha", channel: "sensor.strip_power_4" },

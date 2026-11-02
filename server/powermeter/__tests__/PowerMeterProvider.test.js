@@ -81,7 +81,7 @@ test("the registry knows Home Assistant and refuses duplicates and unknown types
   assert.equal(providerClass("nope"), null);
   assert.throws(() => registerProvider(HomeAssistantProvider), /already registered/);
   assert.throws(() => createProvider({ type: "nope" }), /unknown power-meter type/);
-  const ha = createProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: { HOME_ASSISTANT_TOKEN: "t" } });
+  const ha = createProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: { SPARKDASH_HA_TOKEN: "t" } });
   assert.ok(ha instanceof HomeAssistantProvider);
   assert.equal(ha.label, "Home Assistant");
 });

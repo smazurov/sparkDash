@@ -79,12 +79,15 @@ test("state parsing converts units, prefers last_reported and never invents zero
 test("the provider refuses to start without its token variable", () => {
   assert.throws(
     () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: {} }),
-    /environment variable HOME_ASSISTANT_TOKEN is not set/
+    /environment variable SPARKDASH_HA_TOKEN is not set/
   );
+  // Only that variable: not the name the config might suggest, nor a generic one.
   assert.throws(
-    () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan", tokenEnv: "X_TOKEN" }, { env: {} }),
-    /X_TOKEN/
+    () => new HomeAssistantProvider({ type: "homeassistant", url: "https://ha.lan" }, { env: { HOME_ASSISTANT_TOKEN: TOKEN } }),
+    /SPARKDASH_HA_TOKEN/
   );
+  assert.match(HomeAssistantProvider.validate({ type: "homeassistant", url: "https://ha.lan", tokenEnv: "X_TOKEN" }).join(" "), /tokenEnv is not supported; the token comes from SPARKDASH_HA_TOKEN/);
+  assert.match(HomeAssistantProvider.validate({ type: "homeassistant", url: "https://ha.lan", token: "x" }).join(" "), /must not be stored in the file; set SPARKDASH_HA_TOKEN/);
 });
 
 test("readPower sends the bearer token and reports per-channel failures", async (t) => {
@@ -96,8 +99,8 @@ test("readPower sends the bearer token and reports per-channel failures", async 
   });
   t.after(ha.close);
   const provider = new HomeAssistantProvider(
-    { type: "homeassistant", url: `${ha.url}/`, tokenEnv: "HA" },
-    { env: { HA: TOKEN }, logger: quietLogger }
+    { type: "homeassistant", url: `${ha.url}/` },
+    { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger }
   );
   assert.ok(provider instanceof PowerMeterProvider);
   assert.deepEqual(provider.describe(), { type: "homeassistant", target: ha.url });
@@ -109,7 +112,7 @@ test("readPower sends the bearer token and reports per-channel failures", async 
   assert.equal(readings.get("sensor.gone").error, "entity not found");
   assert.ok(ha.seen.rest.every((r) => r.auth === `Bearer ${TOKEN}`));
 
-  const wrong = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "nope" } });
+  const wrong = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { SPARKDASH_HA_TOKEN: "nope" } });
   const rejected = await wrong.readPower(["sensor.outlet_3_power"]);
   assert.match(rejected.get("sensor.outlet_3_power").error, /rejected the token \(HTTP 401\)/);
 });
@@ -130,7 +133,7 @@ test("readHistory authenticates over WebSocket and returns watt periods per chan
     },
   });
   t.after(ha.close);
-  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger });
+  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger });
   const history = await provider.readHistory(["sensor.outlet_3_power", "sensor.outlet_energy", "sensor.unknown"], {
     fromMs: start,
     toMs: start + 3_600_000,
@@ -152,7 +155,7 @@ test("readHistory authenticates over WebSocket and returns watt periods per chan
 test("readHistory rejects a token Home Assistant does not accept", async (t) => {
   const ha = await fakeHomeAssistant();
   t.after(ha.close);
-  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "wrong" } });
+  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { SPARKDASH_HA_TOKEN: "wrong" } });
   await assert.rejects(provider.readHistory(["sensor.x"], { fromMs: 0, toMs: 1, period: "hour" }), /rejected the token/);
 });
 
@@ -180,7 +183,7 @@ test("every poll and history session resolves through the policy and connects on
   const url = ha.url.replace("127.0.0.1", "ha.test");
   const provider = new HomeAssistantProvider(
     { type: "homeassistant", url },
-    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, lookup: async (host) => (lookups.push(host), [{ address: "127.0.0.1", family: 4 }]) }
+    { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger, lookup: async (host) => (lookups.push(host), [{ address: "127.0.0.1", family: 4 }]) }
   );
   assert.equal((await provider.readPower(["sensor.p3"])).get("sensor.p3").watts, 61);
   const history = await provider.readHistory(["sensor.p3"], { fromMs: 0, toMs: 600_000, period: "5minute" });
@@ -193,14 +196,14 @@ test("a host that resolves to a forbidden address is refused before anything is 
   t.after(ha.close);
   const provider = new HomeAssistantProvider(
     { type: "homeassistant", url: ha.url.replace("127.0.0.1", "ha.test") },
-    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, lookup: async () => [{ address: "169.254.169.254", family: 4 }] }
+    { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger, lookup: async () => [{ address: "169.254.169.254", family: 4 }] }
   );
   await assert.rejects(provider.readPower(["sensor.p3"]), /ha\.test resolves to an address the outbound policy does not allow/);
   await assert.rejects(provider.readHistory(["sensor.p3"], { fromMs: 0, toMs: 600_000, period: "hour" }), /outbound policy/);
   assert.deepEqual([ha.seen.rest.length, ha.seen.ws.length], [0, 0]);
   const unresolvable = new HomeAssistantProvider(
     { type: "homeassistant", url: "https://ha.test" },
-    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, lookup: async () => Promise.reject(Object.assign(new Error("nope"), { code: "ENOTFOUND" })) }
+    { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger, lookup: async () => Promise.reject(Object.assign(new Error("nope"), { code: "ENOTFOUND" })) }
   );
   await assert.rejects(unresolvable.readPower(["sensor.p3"]), /could not resolve ha\.test/);
 });
@@ -212,11 +215,11 @@ test("responses are size-capped: a state body and a WebSocket message", async (t
     statistics: { "sensor.p3": Array.from({ length: 200 }, (_, i) => ({ start: i * 300_000, end: (i + 1) * 300_000, mean: 61, max: 70 })) },
   });
   t.after(ha.close);
-  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger });
+  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger });
   assert.match((await provider.readPower(["sensor.big"])).get("sensor.big").error, /Home Assistant response exceeded the size cap/);
   const small = new HomeAssistantProvider(
     { type: "homeassistant", url: ha.url },
-    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, maxMessageBytes: 4096 }
+    { env: { SPARKDASH_HA_TOKEN: TOKEN }, logger: quietLogger, maxMessageBytes: 4096 }
   );
   await assert.rejects(small.readHistory(["sensor.p3"], { fromMs: 0, toMs: 60 * 300_000, period: "5minute" }), /over the size cap/);
   // The default cap takes the same answer.
