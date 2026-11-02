@@ -2,7 +2,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flush, render } from "../../testing/render";
 import type { MetricsHistoryData, MetricsHistoryResponse } from "../../api/types";
-import { nearestIndex, segmentRuns, yDomain } from "./HistoryChart";
+import { nearestIndex, segmentRuns, windowStats, yDomain } from "./HistoryChart";
 import { HISTORY_POLL_MS, HISTORY_RANGE_KEY, HistoryPanel } from "./HistoryPanel";
 
 vi.mock("../../api/client", () => ({
@@ -54,6 +54,11 @@ function chartsWithData(container: HTMLElement) {
   return [...container.querySelectorAll("[data-chart]")].filter(
     (c) => !c.textContent!.includes("No data in this range"),
   );
+}
+
+/** Chart ids in DOM order — the small-multiple sequence the panel renders. */
+function chartOrder(container: HTMLElement): string[] {
+  return [...container.querySelectorAll<HTMLElement>("[data-chart]")].map((el) => el.dataset.chart!);
 }
 
 function plot(container: HTMLElement, id: string): HTMLElement {
@@ -113,6 +118,22 @@ describe("HistoryChart helpers", () => {
     expect(d.hi).toBeGreaterThanOrEqual(8192 * 1.25);
     expect(yDomain([{ key: "a", label: "a", color: "x", values: [null] }])).toBeNull();
   });
+
+  it("summarises a window: mean of averages, peak of maxes, true min where stored", () => {
+    expect(windowStats([{ avg: 10, max: 20 }, { avg: 30, max: 40 }, null])).toEqual({
+      avg: 20,
+      peak: 40,
+      low: 10,
+      lowFromAvg: true,
+    });
+    expect(windowStats([{ avg: 10, max: 20, min: 5 }, { avg: 30, max: 40, min: 7 }])).toEqual({
+      avg: 20,
+      peak: 40,
+      low: 5,
+      lowFromAvg: false,
+    });
+    expect(windowStats([null]).avg).toBeNull();
+  });
 });
 
 describe("HistoryPanel", () => {
@@ -155,6 +176,40 @@ describe("HistoryPanel", () => {
     expect(mem.textContent).toContain("critical 4.0 GB");
   });
 
+  it("charts what consumed a unified pool in its own cell, and adds none on a discrete card", async () => {
+    const split = data();
+    split.points = split.points.map((p) => ({
+      ...p,
+      memGpuMB: { avg: 6_000, max: 6_500 },
+      memSysMB: { avg: 2_000, max: 2_100 },
+    }));
+    fetchHistory.mockResolvedValue(split);
+    const unified = render(<HistoryPanel sparkId="spark-1" kind="spark" temperatureUnit="celsius" />);
+    await flush();
+    // The free chart keeps its single series and its thresholds: a 6 GB GPU share must not
+    // flatten the free trace by sharing its y-axis.
+    const mem = chart(unified.container, "memFree");
+    const memKeys = [...mem.querySelectorAll("[data-series]")].map((el) => el.getAttribute("data-series"));
+    expect(new Set(memKeys)).toEqual(new Set(["memFreeMB"]));
+    expect(mem.querySelector('[data-series="memGpuMB"]')).toBeNull();
+    expect(mem.textContent).not.toContain("GPU");
+
+    // The split is a chart of its own, on a 0-based domain, next to the free chart.
+    const used = chart(unified.container, "memSplit");
+    expect(used.textContent).toContain("Memory used");
+    expect(used.querySelectorAll('polyline[data-series="memGpuMB"]').length).toBeGreaterThan(0);
+    expect(used.querySelectorAll('polyline[data-series="memSysMB"]').length).toBeGreaterThan(0);
+    expect(used.querySelector('[data-axis="ymin"]')!.textContent).toBe("0 MB");
+    const ids = [...unified.container.querySelectorAll("[data-chart]")].map((c) => c.getAttribute("data-chart"));
+    expect(ids.indexOf("memSplit")).toBe(ids.indexOf("memFree") + 1);
+
+    // A discrete card's used figure is the GPU's alone: there is nothing to split.
+    fetchHistory.mockResolvedValue(split);
+    const discrete = render(<HistoryPanel sparkId="h" kind="host" platform="linux" temperatureUnit="celsius" />);
+    await flush();
+    expect(discrete.container.querySelector('[data-chart="memSplit"]')).toBeNull();
+  });
+
   it("uses the discrete thresholds on a GPU host", async () => {
     fetchHistory.mockResolvedValue(data());
     const { container } = render(<HistoryPanel sparkId="h" kind="host" temperatureUnit="celsius" />);
@@ -172,10 +227,30 @@ describe("HistoryPanel", () => {
     await flush();
     expect(chart(linux.container, "ramUsed").textContent).toContain("RAM used");
 
+    // A Mac's RAM is the unified pool charted above, so only a discrete host gets the RAM chart.
     const mac = render(<HistoryPanel sparkId="m" kind="host" platform="darwin" temperatureUnit="celsius" />);
     await flush();
     expect(mac.container.querySelector('[data-chart="ramUsed"]')).toBeNull();
     expect(chart(mac.container, "memFree").textContent).toContain("Memory free (unified)");
+  });
+
+  it("groups the small multiples by domain: hardware, LLM ports, then system/IO", async () => {
+    const withRam = data();
+    withRam.points = withRam.points.map((p) => ({ ...p, ramUsedMB: { avg: 40_000, max: 41_000 } }));
+
+    const unified = await mount(withRam);
+    expect(chartOrder(unified.container)).toEqual([
+      "gpuUtil", "gpuTemp", "gpuPower", "memFree", "cpuUtil", "cpuTemp",
+      "llm-8888-gen", "llm-8888-prefill", "llm-8888-kv", "network",
+    ]);
+
+    // A discrete host adds RAM used, which belongs with Network in the system/IO domain.
+    const linux = render(<HistoryPanel sparkId="h" kind="host" platform="linux" temperatureUnit="celsius" />);
+    await flush();
+    expect(chartOrder(linux.container)).toEqual([
+      "gpuUtil", "gpuTemp", "gpuPower", "memFree", "cpuUtil", "cpuTemp",
+      "llm-8888-gen", "llm-8888-prefill", "llm-8888-kv", "ramUsed", "network",
+    ]);
   });
 
   it("charts each LLM endpoint, KV only when reported", async () => {
@@ -197,6 +272,8 @@ describe("HistoryPanel", () => {
     expect(tooltips()[0].className).toContain("chart__tip");
     expect(tooltips()[0].textContent).toContain("60%");
     expect(tooltips()[0].textContent).toContain("max 70%");
+    // The same tooltip also summarises the whole visible window, prefixed apart from the bucket values.
+    expect(tooltips()[0].textContent).toContain("window avg 35% · peak 70% · low 10%*");
 
     key(gpu, "ArrowLeft");
     expect(tooltips()[0].textContent).toContain("50%");
@@ -225,6 +302,9 @@ describe("HistoryPanel", () => {
     const tip = container.querySelector("[data-tooltip]")!;
     expect(tip.textContent).toContain("↓ rx2.0 KB/s");
     expect(tip.textContent).toContain("↑ tx1.0 KB/s");
+    // One window line per series, each labelled so a multi-series panel stays readable.
+    expect(tip.textContent).toContain("window ↓ rx avg 2.0 KB/s · peak 4.0 KB/s · low 2.0 KB/s*");
+    expect(tip.textContent).toContain("window ↑ tx avg 1.0 KB/s · peak 1.0 KB/s · low 1.0 KB/s*");
     expect(container.querySelectorAll("[data-crosshair]").length).toBe(chartsWithData(container).length);
     expect(chart(container, "gpuUtil").querySelector('[data-readout="gpuUtil"]')!.textContent).toBe("20%");
     act(() => {
@@ -315,5 +395,20 @@ describe("HistoryPanel", () => {
     expect(container.querySelector("[data-chart]")).not.toBeNull();
     act(() => notify!([{ isIntersecting: false }]));
     expect(container.querySelector("[data-chart]")).not.toBeNull(); // the last answer stays
+  });
+
+  it("shows avg / peak / low for the visible window, flagging low when no true min is stored", async () => {
+    const { container } = await mount();
+    const gpu = chart(container, "gpuUtil").querySelector('[data-stat="gpuUtil"]')!;
+    expect(gpu.textContent).toMatch(/avg 35%/);
+    expect(gpu.textContent).toMatch(/peak 70%/);
+    expect(gpu.textContent).toMatch(/low 10%\*/);
+
+    // memFreeMB is the one series whose buckets keep a true minimum.
+    const mem = chart(container, "memFree").querySelector('[data-stat="memFreeMB"]')!;
+    expect(mem.textContent).toMatch(/avg 8\.8 GB/);
+    expect(mem.textContent).toMatch(/peak 9\.3 GB/);
+    expect(mem.textContent).toMatch(/low 6\.8 GB/);
+    expect(mem.textContent).not.toContain("*");
   });
 });

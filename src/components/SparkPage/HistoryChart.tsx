@@ -19,6 +19,44 @@ const PAD_Y = 3;
 /** Consecutive buckets further apart than this many steps are a gap. */
 const GAP_STEPS = 1.5;
 
+/** avg / peak / low over the buckets that carry samples in the visible window. */
+export interface WindowStats {
+  avg: number | null;
+  peak: number | null;
+  low: number | null;
+  /** True when some bucket had no `min`, so `low` is the lowest bucket average. */
+  lowFromAvg: boolean;
+}
+
+/**
+ * Window summary for one series. `avg` is the mean of the bucket averages (every range
+ * returns uniform-width buckets, so that is the time-weighted mean; a partial newest
+ * bucket only skews it slightly). `peak` is the largest bucket max. `low` is the smallest
+ * bucket min where the server keeps one — today only memory headroom does — and otherwise
+ * the lowest bucket average, flagged so the label can say which it is.
+ */
+export function windowStats(values: ReadonlyArray<HistoryStat | null>): WindowStats {
+  let sum = 0;
+  let n = 0;
+  let peak = -Infinity;
+  let low = Infinity;
+  let missingMin = 0;
+  for (const st of values) {
+    if (!st) continue;
+    n += 1;
+    sum += st.avg;
+    if (st.max > peak) peak = st.max;
+    if (typeof st.min === "number" && Number.isFinite(st.min)) {
+      if (st.min < low) low = st.min;
+    } else {
+      missingMin += 1;
+      if (st.avg < low) low = st.avg;
+    }
+  }
+  if (n === 0) return { avg: null, peak: null, low: null, lowFromAvg: false };
+  return { avg: sum / n, peak, low, lowFromAvg: missingMin > 0 };
+}
+
 export interface HistoryChartSeries {
   key: string;
   label: string;
@@ -233,6 +271,15 @@ export function HistoryChart({
   const crossPct = crossX != null ? (crossX / VIEW_W) * 100 : null;
   const showTooltip = hasCursor && active;
 
+  // One window summary per series, computed once: the stats row under the header
+  // and the tooltip's summary line read the same numbers.
+  const windowRows = series.flatMap((s) => {
+    const w = windowStats(s.values);
+    return w.avg == null
+      ? []
+      : [{ series: s, avg: w.avg, peak: w.peak, low: w.low, lowFromAvg: w.lowFromAvg }];
+  });
+
   const point = (i: number, v: number) => `${xOf(timeline[i]).toFixed(2)},${yOf(v).toFixed(2)}`;
 
   return (
@@ -250,6 +297,27 @@ export function HistoryChart({
             );
           })}
         </span>
+      </div>
+      <div className="sp-hist-chart__stats mono" aria-label="window summary">
+        {windowRows.map(({ series: s, avg, peak, low, lowFromAvg }) => (
+          <span key={s.key} className="sp-hist-chart__stat" data-stat={s.key}>
+            {series.length > 1 && <small>{s.label}</small>}
+            <span>avg {format(avg)}</span>
+            <span>peak {format(peak ?? avg)}</span>
+            {low != null && (
+              <span
+                title={
+                  lowFromAvg
+                    ? "lowest bucket average — a true per-bucket minimum is only stored for memory headroom"
+                    : undefined
+                }
+              >
+                low {format(low)}
+                {lowFromAvg ? "*" : ""}
+              </span>
+            )}
+          </span>
+        ))}
       </div>
       <div className="sp-hist-chart__body">
         <div className="sp-hist-chart__yaxis mono" style={{ height: VIEW_H }} aria-hidden="true">
@@ -436,6 +504,33 @@ export function HistoryChart({
                     })
                     .filter(Boolean)
                     .join(" · ")}
+                </div>
+              )}
+              {windowRows.length > 0 && (
+                <div className="chart__tip-foot sp-hist-chart__tip-window" data-window-summary="">
+                  {windowRows.map(({ series: s, avg, peak, low, lowFromAvg }) => {
+                    const parts = [`avg ${format(avg)}`, `peak ${format(peak ?? avg)}`];
+                    if (low != null) parts.push(`low ${format(low)}${lowFromAvg ? "*" : ""}`);
+                    return (
+                      <div
+                        key={s.key}
+                        className="sp-hist-chart__tip-window-row"
+                        title={
+                          lowFromAvg
+                            ? "low is the lowest bucket average — a true per-bucket minimum is only stored for memory headroom"
+                            : undefined
+                        }
+                      >
+                        <span className="sp-hist-chart__tip-window-tag">window</span>{" "}
+                        {series.length > 1 && (
+                          <>
+                            <span className="sp-hist-chart__tip-window-series">{s.label}</span>{" "}
+                          </>
+                        )}
+                        <span>{parts.join(" · ")}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

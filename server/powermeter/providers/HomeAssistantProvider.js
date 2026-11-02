@@ -10,8 +10,18 @@
  * Config entry: { "type": "homeassistant", "url": "https://ha.lan:8123", "tokenEnv": "HOME_ASSISTANT_TOKEN" }
  * The long-lived access token is read from the named environment variable and never
  * leaves this module. A read-only HA user is enough.
+ *
+ * Every connection follows the dashboard's outbound policy (server/validate.js), as alert
+ * channels do: the host must be an allowed target when the config loads, it is resolved with
+ * assertAllowedTarget before each poll and each history session, and the connection is pinned
+ * to the addresses that check approved. Responses are size-capped: a state body at 64 KiB, a
+ * WebSocket message at 8 MiB.
  */
+import dns from "node:dns/promises";
 import WebSocket from "ws";
+import { channelHost, pinnedLookup } from "../../alerts/outbound.js";
+import { fetchPinned } from "../../occupancy/pinnedFetch.js";
+import { assertAllowedTarget, isAllowedTargetHost } from "../../validate.js";
 import { PowerMeterProvider } from "./PowerMeterProvider.js";
 
 const ENTITY_PATTERN = /^[a-z0-9_]+\.[a-z0-9_]+$/;
@@ -19,6 +29,10 @@ const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_TOKEN_ENV = "HOME_ASSISTANT_TOKEN";
 const DEFAULT_TIMEOUT_MS = 8_000;
 const HISTORY_TIMEOUT_MS = 60_000;
+/** A state body is about 1 KB. */
+const MAX_STATE_BYTES = 64 * 1024;
+/** One WebSocket message; a 5-day chunk of 5-minute statistics is about 100 KB per channel. */
+const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 /** Multipliers to watts for the power units HA uses. */
 const POWER_UNITS = Object.freeze({ mW: 0.001, W: 1, kW: 1_000, MW: 1_000_000 });
 /** Tolerated meter noise around zero; larger negative readings are rejected. */
@@ -32,13 +46,17 @@ const TLS_CODES = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
-/** Describe a fetch failure without leaking request headers. */
+/** Describe a connection failure without leaking request headers. */
 function describeFetchError(error) {
   const code = error?.cause?.code || error?.code;
-  if (error?.name === "TimeoutError" || error?.name === "AbortError") return "request timed out";
   if (code && TLS_CODES.has(code)) {
     return `TLS certificate not trusted (${code}); add the issuing CA with NODE_EXTRA_CA_CERTS`;
   }
+  if (code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") return "Home Assistant sent a message over the size cap";
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") return "request timed out";
+  if (error?.cause?.code) return String(error.cause.code);
+  // fetchPinned's own errors already say what failed ("Home Assistant request timed out", …).
+  if (error?.status) return error.message;
   return code ? `${code}` : error?.message || String(error);
 }
 
@@ -82,7 +100,7 @@ export function parseHomeAssistantState(body) {
  * One short WebSocket session: authenticate, send each request in order, resolve with
  * their results, close. HA answers every request with a `result` frame carrying its id.
  */
-function webSocketSession({ url, token, requests, timeoutMs, signal, WebSocketImpl }) {
+function webSocketSession({ url, token, requests, timeoutMs, signal, WebSocketImpl, lookup, maxPayload }) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let socket;
@@ -105,7 +123,7 @@ function webSocketSession({ url, token, requests, timeoutMs, signal, WebSocketIm
     if (signal?.aborted) return onAbort();
     signal?.addEventListener?.("abort", onAbort, { once: true });
     try {
-      socket = new WebSocketImpl(url, { handshakeTimeout: Math.min(timeoutMs, 15_000) });
+      socket = new WebSocketImpl(url, { handshakeTimeout: Math.min(timeoutMs, 15_000), lookup, maxPayload });
     } catch (error) {
       return finish(new Error(describeFetchError(error)));
     }
@@ -155,6 +173,9 @@ export class HomeAssistantProvider extends PowerMeterProvider {
     }
     if (url && url.protocol !== "http:" && url.protocol !== "https:") problems.push("url must use http or https");
     if (url && (url.username || url.password)) problems.push("url must not embed credentials; use tokenEnv");
+    if (url && (url.protocol === "http:" || url.protocol === "https:") && !isAllowedTargetHost(channelHost(url))) {
+      problems.push("url host is not allowed (the outbound policy for unit, LLM and alert targets)");
+    }
     if (spec.tokenEnv !== undefined && (typeof spec.tokenEnv !== "string" || !ENV_NAME_PATTERN.test(spec.tokenEnv))) {
       problems.push("tokenEnv must be an environment variable name");
     }
@@ -172,14 +193,27 @@ export class HomeAssistantProvider extends PowerMeterProvider {
   // Private, so the token never shows up in JSON.stringify, util.inspect or a log line.
   #token;
   #base;
+  #host;
   #wsUrl;
   #timeoutMs;
-  #fetch;
+  #lookup;
   #WebSocket;
   #logger;
+  #maxStateBytes;
+  #maxMessageBytes;
   #warned = new Set();
 
-  constructor(spec, { env = process.env, fetchImpl = globalThis.fetch, WebSocketImpl = WebSocket, logger = console } = {}) {
+  constructor(
+    spec,
+    {
+      env = process.env,
+      lookup = dns.lookup,
+      WebSocketImpl = WebSocket,
+      logger = console,
+      maxStateBytes = MAX_STATE_BYTES,
+      maxMessageBytes = MAX_MESSAGE_BYTES,
+    } = {}
+  ) {
     super(spec);
     const tokenEnv = spec.tokenEnv || DEFAULT_TOKEN_ENV;
     const token = env[tokenEnv];
@@ -188,30 +222,50 @@ export class HomeAssistantProvider extends PowerMeterProvider {
     }
     this.#token = token;
     this.#base = String(spec.url).replace(/\/+$/, "");
+    this.#host = channelHost(new URL(this.#base));
     this.#wsUrl = `${this.#base.replace(/^http/, "ws")}/api/websocket`;
     this.#timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.#fetch = fetchImpl;
+    this.#lookup = lookup;
     this.#WebSocket = WebSocketImpl;
     this.#logger = logger;
+    this.#maxStateBytes = maxStateBytes;
+    this.#maxMessageBytes = maxMessageBytes;
   }
 
   describe() {
     return { type: HomeAssistantProvider.type, target: this.#base };
   }
 
+  /** The meter's addresses under the outbound policy; every connection is pinned to them. */
+  async #addresses() {
+    try {
+      return await assertAllowedTarget(this.#host, [this.#host], { lookup: this.#lookup });
+    } catch (error) {
+      throw new Error(
+        error?.status === 403
+          ? `${this.#host} resolves to an address the outbound policy does not allow`
+          : `could not resolve ${this.#host}`
+      );
+    }
+  }
+
   async readPower(channels, { signal } = {}) {
-    const readings = await Promise.all(channels.map((channel) => this.#readOne(channel, signal)));
+    const addresses = await this.#addresses();
+    const readings = await Promise.all(channels.map((channel) => this.#readOne(channel, addresses, signal)));
     return new Map(channels.map((channel, index) => [channel, readings[index]]));
   }
 
   async readHistory(channels, { fromMs, toMs: endMs, period, signal } = {}) {
     if (!HomeAssistantProvider.historyPeriods.includes(period)) throw new Error(`unsupported history period ${period}`);
+    const addresses = await this.#addresses();
     const [metadata, statistics] = await webSocketSession({
       url: this.#wsUrl,
       token: this.#token,
       timeoutMs: HISTORY_TIMEOUT_MS,
       signal,
       WebSocketImpl: this.#WebSocket,
+      lookup: pinnedLookup(addresses),
+      maxPayload: this.#maxMessageBytes,
       requests: [
         { type: "recorder/get_statistics_metadata", statistic_ids: channels },
         {
@@ -261,14 +315,17 @@ export class HomeAssistantProvider extends PowerMeterProvider {
     return out;
   }
 
-  async #readOne(entityId, signal) {
-    const signals = [AbortSignal.timeout(this.#timeoutMs)];
-    if (signal) signals.push(signal);
+  async #readOne(entityId, addresses, signal) {
     let response;
     try {
-      response = await this.#fetch(`${this.#base}/api/states/${encodeURIComponent(entityId)}`, {
-        headers: { authorization: `Bearer ${this.#token}`, accept: "application/json" },
-        signal: AbortSignal.any(signals),
+      response = await fetchPinned(new URL(`${this.#base}/api/states/${encodeURIComponent(entityId)}`), {
+        addresses,
+        headers: { authorization: `Bearer ${this.#token}` },
+        timeoutMs: this.#timeoutMs,
+        maxBytes: this.#maxStateBytes,
+        signal,
+        label: "Home Assistant",
+        allowErrorStatus: true,
       });
     } catch (error) {
       return { watts: null, atMs: null, error: describeFetchError(error) };
@@ -277,10 +334,10 @@ export class HomeAssistantProvider extends PowerMeterProvider {
       return { watts: null, atMs: null, error: `Home Assistant rejected the token (HTTP ${response.status})` };
     }
     if (response.status === 404) return { watts: null, atMs: null, error: "entity not found" };
-    if (!response.ok) return { watts: null, atMs: null, error: `HTTP ${response.status}` };
+    if (response.status < 200 || response.status >= 300) return { watts: null, atMs: null, error: `HTTP ${response.status}` };
     let body;
     try {
-      body = await response.json();
+      body = JSON.parse(response.body);
     } catch {
       return { watts: null, atMs: null, error: "response is not JSON" };
     }

@@ -85,6 +85,16 @@ already archived, and a meter with history loads the last day again.
 - **TLS**: an HA with a private CA needs that CA trusted by Node:
   `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`. Without it the meter reports
   `TLS certificate not trusted`.
+- **Outbound policy**: the HA host follows the same rules as unit, LLM and alert targets
+  (`server/validate.js`). It must be an allowed target when the file loads; before each poll
+  and each history session it is resolved, an answer that is a forbidden address (link-local
+  and cloud metadata, multicast, unspecified) refuses the request, and the connection is pinned
+  to the checked addresses, so DNS rebinding cannot redirect it. LAN, Tailscale and loopback
+  addresses are allowed. Plain `http://` works on the LAN, as Home Assistant is commonly set
+  up; prefer `https://` where the token crosses a network you do not trust.
+- **Bounds**: a state read times out after 8 s by default (`timeoutMs`, 0.5–60 s, and never
+  later than the next poll) and is capped at 64 KiB; a history session has a 60 s deadline,
+  each WebSocket message is capped at 8 MiB, and a history request is abandoned after 120 s.
 
 ## How wall power is recorded
 

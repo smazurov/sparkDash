@@ -155,3 +155,71 @@ test("readHistory rejects a token Home Assistant does not accept", async (t) => 
   const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: "wrong" } });
   await assert.rejects(provider.readHistory(["sensor.x"], { fromMs: 0, toMs: 1, period: "hour" }), /rejected the token/);
 });
+
+// ─── Outbound policy and size caps ──────────────────────────────────────
+
+test("the URL host must pass the outbound policy when the config loads", () => {
+  const problems = (url) => HomeAssistantProvider.validate({ type: "homeassistant", url });
+  for (const url of ["https://169.254.169.254", "http://[fe80::1]:8123", "http://0.0.0.0:8123", "http://224.0.0.1"]) {
+    assert.match(problems(url).join(" "), /outbound policy/, url);
+  }
+  for (const url of ["https://ha.lan", "http://192.168.1.10:8123", "http://homeassistant.local:8123", "http://127.0.0.1:8123", "http://100.64.0.7:8123"]) {
+    assert.deepEqual(problems(url), [], url);
+  }
+});
+
+test("every poll and history session resolves through the policy and connects only to the checked address", async (t) => {
+  const ha = await fakeHomeAssistant({
+    states: { "sensor.p3": { state: "61", attributes: { unit_of_measurement: "W" }, last_reported: new Date().toISOString() } },
+    metadata: [{ statistic_id: "sensor.p3", has_mean: true, unit_class: "power", statistics_unit_of_measurement: "W" }],
+    statistics: { "sensor.p3": [{ start: 0, end: 300_000, mean: 61, max: 70 }] },
+  });
+  t.after(ha.close);
+  const lookups = [];
+  // A name no real resolver knows: the request only works if it uses the checked address.
+  const url = ha.url.replace("127.0.0.1", "ha.test");
+  const provider = new HomeAssistantProvider(
+    { type: "homeassistant", url },
+    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, lookup: async (host) => (lookups.push(host), [{ address: "127.0.0.1", family: 4 }]) }
+  );
+  assert.equal((await provider.readPower(["sensor.p3"])).get("sensor.p3").watts, 61);
+  const history = await provider.readHistory(["sensor.p3"], { fromMs: 0, toMs: 600_000, period: "5minute" });
+  assert.equal(history.get("sensor.p3")[0].meanW, 61);
+  assert.deepEqual(lookups, ["ha.test", "ha.test"], "resolved once per poll and once per session");
+});
+
+test("a host that resolves to a forbidden address is refused before anything is sent", async (t) => {
+  const ha = await fakeHomeAssistant({ states: { "sensor.p3": { state: "61", attributes: { unit_of_measurement: "W" } } } });
+  t.after(ha.close);
+  const provider = new HomeAssistantProvider(
+    { type: "homeassistant", url: ha.url.replace("127.0.0.1", "ha.test") },
+    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, lookup: async () => [{ address: "169.254.169.254", family: 4 }] }
+  );
+  await assert.rejects(provider.readPower(["sensor.p3"]), /ha\.test resolves to an address the outbound policy does not allow/);
+  await assert.rejects(provider.readHistory(["sensor.p3"], { fromMs: 0, toMs: 600_000, period: "hour" }), /outbound policy/);
+  assert.deepEqual([ha.seen.rest.length, ha.seen.ws.length], [0, 0]);
+  const unresolvable = new HomeAssistantProvider(
+    { type: "homeassistant", url: "https://ha.test" },
+    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, lookup: async () => Promise.reject(Object.assign(new Error("nope"), { code: "ENOTFOUND" })) }
+  );
+  await assert.rejects(unresolvable.readPower(["sensor.p3"]), /could not resolve ha\.test/);
+});
+
+test("responses are size-capped: a state body and a WebSocket message", async (t) => {
+  const ha = await fakeHomeAssistant({
+    states: { "sensor.big": { state: "61", attributes: { unit_of_measurement: "W", junk: "x".repeat(100_000) } } },
+    metadata: [{ statistic_id: "sensor.p3", has_mean: true, unit_class: "power", statistics_unit_of_measurement: "W" }],
+    statistics: { "sensor.p3": Array.from({ length: 200 }, (_, i) => ({ start: i * 300_000, end: (i + 1) * 300_000, mean: 61, max: 70 })) },
+  });
+  t.after(ha.close);
+  const provider = new HomeAssistantProvider({ type: "homeassistant", url: ha.url }, { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger });
+  assert.match((await provider.readPower(["sensor.big"])).get("sensor.big").error, /Home Assistant response exceeded the size cap/);
+  const small = new HomeAssistantProvider(
+    { type: "homeassistant", url: ha.url },
+    { env: { HOME_ASSISTANT_TOKEN: TOKEN }, logger: quietLogger, maxMessageBytes: 4096 }
+  );
+  await assert.rejects(small.readHistory(["sensor.p3"], { fromMs: 0, toMs: 60 * 300_000, period: "5minute" }), /over the size cap/);
+  // The default cap takes the same answer.
+  const ok = await provider.readHistory(["sensor.p3"], { fromMs: 0, toMs: 200 * 300_000, period: "5minute" });
+  assert.equal(ok.get("sensor.p3").length, 200);
+});

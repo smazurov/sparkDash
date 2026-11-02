@@ -116,6 +116,18 @@ function aligned<P extends { t: number }>(
 
 const hasAny = (values: ReadonlyArray<HistoryStat | null>) => values.some(Boolean);
 
+/**
+ * Domain rank for the small multiples: hardware first, then the per-port LLM charts, then
+ * system/IO. The charts are built in metric order, so the rank is applied as a stable sort at
+ * the end: a new chart joins its domain without reordering every push site.
+ */
+const SYSTEM_CHART_IDS = new Set(["ramUsed", "network"]);
+
+function chartDomain(id: string): number {
+  if (id.startsWith("llm-")) return 1;
+  return SYSTEM_CHART_IDS.has(id) ? 2 : 0;
+}
+
 function buildCharts(
   data: MetricsHistoryData,
   timeline: readonly number[],
@@ -130,6 +142,31 @@ function buildCharts(
   const accent = "var(--color-accent)";
   const model = memoryModelFor(kind, platform);
   const headroom = HEADROOM_THRESHOLDS_MB[model];
+
+  // The free line and its headroom thresholds are one question with one scale. The used split is
+  // a different question at a different magnitude (a 109 GB GPU share against 6 GB free), so it
+  // gets its own chart rather than sharing this y-axis: on one domain the free trace collapsed to
+  // a sub-pixel band and the two threshold labels landed 3 px apart (#350 review).
+  const memFree = aligned(timeline, pts, (p) => p.memFreeMB);
+  const gpuUsed = model === "unified" ? aligned(timeline, pts, (p) => p.memGpuMB) : null;
+  const sysUsed = model === "unified" ? aligned(timeline, pts, (p) => p.memSysMB) : null;
+  // A unified pool has two owners — the GPU/model side and everything else — so the split answers
+  // "what consumed the pool" (#336) as a trend of its own. A discrete card's `used` figure is the
+  // GPU's alone, so there is nothing to split and no chart is added.
+  const memSplit: ChartDef | null =
+    gpuUsed && sysUsed && hasAny(gpuUsed) && hasAny(sysUsed)
+      ? {
+          id: "memSplit",
+          title: "Memory used",
+          format: formatMb,
+          yMin: 0,
+          yUnit: 1024,
+          series: [
+            { key: "memGpuMB", label: "GPU", color: "var(--color-violet)", band: "max", values: gpuUsed },
+            { key: "memSysMB", label: "System", color: "var(--color-info)", band: "max", values: sysUsed },
+          ],
+        }
+      : null;
 
   const charts: ChartDef[] = [
     {
@@ -164,8 +201,9 @@ function buildCharts(
         { value: headroom.low, label: `low ${formatMb(headroom.low)}`, color: "var(--color-warning)" },
         { value: headroom.critical, label: `critical ${formatMb(headroom.critical)}`, color: "var(--color-danger)" },
       ],
-      series: [{ key: "memFreeMB", label: "Free", color: "var(--color-success)", band: "min", values: aligned(timeline, pts, (p) => p.memFreeMB) }],
+      series: [{ key: "memFreeMB", label: "Free", color: "var(--color-success)", band: "min", values: memFree }],
     },
+    ...(memSplit ? [memSplit] : []),
     {
       id: "cpuUtil",
       title: "CPU utilization",
@@ -238,7 +276,8 @@ function buildCharts(
       });
     }
   }
-  return charts;
+  // Stable sort: within a domain the metric order above is kept.
+  return charts.sort((a, b) => chartDomain(a.id) - chartDomain(b.id));
 }
 
 /**

@@ -39,7 +39,7 @@ const TENSORFOLD_CACHED_PROMPT_COUNTERS = [
   "prefix_cache_hits_total",
 ];
 /** owned_by values that are exactly an engine's own name (each is also its backend type). */
-const OWNED_BY_ENGINES = new Set(["locals", "splash", "tensorfold", "ds4", "sglang", "exl3", "q27", "freetoken", "radiance"]);
+const OWNED_BY_ENGINES = new Set(["locals", "splash", "tensorfold", "ds4", "sglang", "exl3", "q27", "freetoken", "radiance", "ninfer"]);
 /** Current SGLang names first. Deprecated aliases still work but log a warning per hit. */
 const SGLANG_SERVER_INFO_PATHS = ["/server_info", "/get_server_info"];
 const SGLANG_MODEL_INFO_PATHS = ["/model_info", "/get_model_info"];
@@ -126,7 +126,7 @@ export class LlmProbe {
     this._openTunnel = openSshLlmTunnel;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'lmstudio' | 'ollama' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'freetoken' | 'radiance' | 'strata' | 'flare' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'lmstudio' | 'ollama' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'ninfer' | 'freetoken' | 'radiance' | 'strata' | 'flare' | null
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -165,6 +165,14 @@ export class LlmProbe {
     this._tensorfoldLastPrefill = null;
     /** Previous TensorFold /metrics `generation_tokens_total + generation_tokens_running`. */
     this._tensorfoldPromProduced = null;
+    /** Previous ninfer /metrics `ninfer_generation_tokens_total` (cumulative output tokens). */
+    this._ninferPrevGen = null;
+    /** Previous ninfer prefill window: prompt/cached/computed tokens and the prefill-time histogram sum. */
+    this._ninferPrevPrefillSum = null;
+    this._ninferPrevPrefillCount = null;
+    this._ninferPrevPrompt = null;
+    this._ninferPrevCached = null;
+    this._ninferPrevComputed = null;
     /**
      * Average decode tok/s of ONE stream (TensorFold): 1 / mean seconds per
      * output token over the last poll window, from the server's own TPOT
@@ -177,15 +185,15 @@ export class LlmProbe {
     this._tensorfoldTpotCount = null;
     this._tensorfoldTpotSum = null;
     /**
-     * Effective prefill tok/s of ONE request (TensorFold /metrics-only builds):
-     * Δprompt_tokens_total / Δprefill-seconds over finished requests. Labeled
-     * "effective" because prompt_tokens_total includes prefix-cache hits and
-     * the engine exposes no cached counter on /metrics. null until a request
-     * with prefill time has finished; held (not zeroed) between completions.
+     * Completed-window prefill tok/s: Δprompt tokens / Δprefill seconds,
+     * including cache credit and explicitly labelled effective.
+     * Not a live or individual-request rate;
+     * null before measurement and after 20 seconds without a valid update.
      */
     this.perStreamPrefillTps = null;
     /** When the last SANITY-PASSING prefill measurement was taken (hold expires after 20 s). */
     this._tensorfoldPrefillMeasuredAt = null;
+    this.prefillTpsSource = null;
     /** Previous prompt_tokens_total / prefill histogram _sum / _count for the /metrics prefill window. */
     this._tensorfoldPromptTokens = null;
     this._tensorfoldPrefillSum = null;
@@ -198,6 +206,13 @@ export class LlmProbe {
     this.prefillActive = false;
     /** Previous prefill counters by kind; null until first labeled sample. */
     this.lastPrefillKinds = null;
+    /** Previous by-source computed prompt tokens; null until first labeled sample. */
+    this.lastPromptCompute = null;
+    /** Previous per-request prefill totals (count / seconds / computed / cached). */
+    this._lastPrefillTotals = null;
+    /** Seconds the oldest running request has been open; null when idle. */
+    this.inFlightSeconds = null;
+    this._runningSince = null;
     /** Previous vLLM TTFT histogram `_sum` (seconds). null until first sample. */
     this.lastTtftSum = null;
     /** Previous vLLM TTFT histogram `_count` (requests). null until first sample. */
@@ -535,11 +550,18 @@ export class LlmProbe {
     this._tensorfoldPrevCached = null;
     this._tensorfoldLastPrefill = null;
     this._tensorfoldPromProduced = null;
+    this._ninferPrevGen = null;
+    this._ninferPrevPrefillSum = null;
+    this._ninferPrevPrefillCount = null;
+    this._ninferPrevPrompt = null;
+    this._ninferPrevCached = null;
+    this._ninferPrevComputed = null;
     this.perStreamTps = null;
     this._tensorfoldTpotCount = null;
     this._tensorfoldTpotSum = null;
     this.perStreamPrefillTps = null;
     this._tensorfoldPrefillMeasuredAt = null;
+    this.prefillTpsSource = null;
     this._tensorfoldPromptTokens = null;
     this._tensorfoldPrefillSum = null;
     this._tensorfoldPrefillCount = null;
@@ -548,6 +570,10 @@ export class LlmProbe {
     this._tensorfoldSplitSeen = false;
     this.prefillActive = false;
     this.lastPrefillKinds = null;
+    this.lastPromptCompute = null;
+    this._lastPrefillTotals = null;
+    this.inFlightSeconds = null;
+    this._runningSince = null;
     this.lastTtftSum = null;
     this.lastTtftCount = null;
     this.lastIterSum = null;
@@ -708,6 +734,8 @@ export class LlmProbe {
       if (/splash/i.test(ownedBy)) return "splash";
       // TensorFold (ashhart/TensorFold) reports owned_by: "tensorfold" on both MLX and CUDA servers.
       if (/tensorfold/i.test(ownedBy)) return "tensorfold";
+      // ninfer reports owned_by: "ninfer" and serves ninfer_* Prometheus series on /metrics.
+      if (/ninfer/i.test(ownedBy)) return "ninfer";
       // FreeToken reports owned_by: "FreeToken".
       if (/freetoken/i.test(ownedBy)) return "freetoken";
       // Radiance (native RDNA engine) reports owned_by: "radiance" and serves vLLM-format /metrics.
@@ -977,6 +1005,8 @@ export class LlmProbe {
         this.backendType = "exl3";
       } else if (/tensorfold/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "tensorfold";
+      } else if (/ninfer/i.test(owned) && this.backendType !== "ds4") {
+        this.backendType = "ninfer";
       } else if (/freetoken/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "freetoken";
       } else if (/radiance/i.test(owned) && this.backendType !== "ds4") {
@@ -1020,6 +1050,13 @@ export class LlmProbe {
     // them every poll below, so a size never outlives the payload it came from.
     this._clearEngineMemory();
 
+    // ninfer: Prometheus-only engine. /metrics carries cumulative generation tokens,
+    // per-pool KV-cache ratios and spec-decode draft/accepted counters per position.
+    if (this.backendType === "ninfer") {
+      await this._applyNinferMetrics(dtSec);
+      return this._getSnapshot();
+    }
+
     // TensorFold: no Prometheus. /health carries cumulative token totals when the
     // server publishes them; without them tok/s stays 0 rather than guessing.
     if (this.backendType === "tensorfold") {
@@ -1027,6 +1064,7 @@ export class LlmProbe {
         const healthRes = await this._fetch(`${this.baseUrl}/health`);
         if (healthRes.ok) {
           const health = await healthRes.json().catch(() => null);
+          this.prefillTpsSource = null;
           this._applyTensorFoldHealth(health, dtSec);
           this._applyTensorFoldLive(health);
           // TensorFold's open /health names the release when the build carries one
@@ -1040,7 +1078,7 @@ export class LlmProbe {
             // A decode rate the server reports itself wins over the /metrics counter diff.
             const liveDecode = health?.live?.decode_tokens_per_second;
             const hasLiveDecode = liveDecode != null && Number.isFinite(Number(liveDecode));
-            await this._applyTensorFoldMetrics(hasLiveDecode ? undefined : dtSec);
+            await this._applyTensorFoldMetrics(dtSec, false, hasLiveDecode);
           } else if (this.requestsWaiting == null) {
             // A /health with token totals but no waiting count (TensorFold's Python engine) keeps
             // its queue gauge in /metrics alone: poll it queue-only, so /health stays the authority
@@ -2051,6 +2089,7 @@ export class LlmProbe {
     const prefill = rate(live.prefill_tokens_per_second);
     if (decode != null) this.generationTps = decode;
     if (prefill != null) this.prefillTps = prefill;
+    if (prefill > 0) this.prefillTpsSource = "live";
     const waiting = live.waiting == null ? NaN : Number(live.waiting);
     if (Number.isFinite(waiting) && waiting >= 0) this.requestsWaiting = Math.round(waiting);
     const conns = live.connections == null ? NaN : Number(live.connections);
@@ -2061,6 +2100,139 @@ export class LlmProbe {
   }
 
   /**
+   * ninfer: Prometheus-only engine (/metrics). Reads cumulative output tokens for the
+   * live tok/s rate, per-pool KV-cache usage, spec-decode acceptance per position, and
+   * the inter-token-latency histogram when the build exports buckets.
+   * @param {number} dtSec seconds since the previous poll
+   */
+  async _applyNinferMetrics(dtSec) {
+    let txt;
+    try {
+      const res = await this._fetch(`${this.baseUrl}/metrics`);
+      if (!res.ok) return;
+      txt = await res.text();
+    } catch {
+      return;
+    }
+    if (typeof txt !== "string" || !txt.includes("ninfer_")) return;
+
+    // Cumulative output tokens → total + live rate (counter diff).
+    const gen = this._getPromMetric(txt, "ninfer_generation_tokens_total");
+    if (Number.isFinite(gen) && gen >= 0) {
+      this.totalOutputTokens = gen;
+      this.lastTokenCounts.output = gen;
+      const prev = this._ninferPrevGen;
+      if (dtSec > 0 && prev != null && gen >= prev) {
+        this.generationTps = Math.round(((gen - prev) / dtSec) * 100) / 100;
+      } else {
+        this.generationTps = 0;
+      }
+      this._ninferPrevGen = gen;
+    }
+
+    // KV-cache usage is reported per pool; the text pool is the one that reflects
+    // the served sequence cache, mtp is the spec-decode draft cache.
+    const kvText = this._getPromMetricLabeled(txt, "ninfer_kv_cache_usage_ratio", "pool", "text");
+    const kvMtp = this._getPromMetricLabeled(txt, "ninfer_kv_cache_usage_ratio", "pool", "mtp");
+    if (Number.isFinite(kvText)) this.kvCacheUsage = Math.min(1, Math.max(0, kvText));
+    else if (Number.isFinite(kvMtp)) this.kvCacheUsage = Math.min(1, Math.max(0, kvMtp));
+
+    // Spec-decode acceptance: accepted / drafted across every reported position.
+    let drafted = 0;
+    let accepted = 0;
+    let anyPosition = false;
+    for (let pos = 1; pos <= 16; pos += 1) {
+      const d = this._getPromMetricLabeled(
+        txt,
+        "ninfer_spec_decode_draft_tokens_per_pos_total",
+        "position",
+        String(pos)
+      );
+      const a = this._getPromMetricLabeled(
+        txt,
+        "ninfer_spec_decode_accepted_tokens_per_pos_total",
+        "position",
+        String(pos)
+      );
+      if (Number.isFinite(d)) {
+        drafted += d;
+        anyPosition = true;
+      }
+      if (Number.isFinite(a)) accepted += a;
+    }
+    this.mtpAcceptanceRate =
+      anyPosition && drafted > 0 ? Math.round((accepted / drafted) * 10000) / 10000 : null;
+
+    // Inter-token latency p95 when the build exports histogram buckets.
+    const itlHist = this._parseHistogram(txt, "ninfer_inter_token_latency_seconds", "ninfer_inter_token_latency_seconds_count");
+    const itlP95 = this._histogramQuantile(itlHist.buckets, itlHist.total, 0.95);
+    this.itlP95Seconds = itlP95 == null ? null : Math.round(itlP95 * 1000) / 1000;
+
+    // Prompt accounting: all input tokens (including prefix-cache hits), the cached
+    // share, and the computed (uncached) prefill tokens the engine actually processed.
+    const prompt = this._getPromMetric(txt, "ninfer_prompt_tokens_total");
+    const cached = this._getPromMetric(txt, "ninfer_prompt_tokens_cached_total");
+    const computedPrefill = this._getPromMetric(txt, "ninfer_prefill_tokens_total");
+    if (Number.isFinite(prompt) && prompt >= 0) {
+      this.totalPromptTokens = prompt;
+      this.lastTokenCounts.input = prompt;
+    }
+    if (Number.isFinite(cached) && cached >= 0) {
+      this.totalCachedTokens = Number.isFinite(prompt) ? Math.min(cached, prompt) : cached;
+    }
+
+    // Prefill rate uses the per-request prefill-time histogram as the denominator:
+    // prompt tokens include prefix-cache hits, so a computed-only numerator can look
+    // flat while prefill traffic is heavy. Split cached vs computed over that window.
+    const pfSum = this._getPromMetric(txt, "ninfer_request_prefill_time_seconds_sum");
+    const pfCount = this._getPromMetric(txt, "ninfer_request_prefill_time_seconds_count");
+    if (dtSec > 0 && Number.isFinite(pfSum) && this._ninferPrevPrefillSum != null) {
+      const dPrefillSeconds = pfSum - this._ninferPrevPrefillSum;
+      const dPrompt = Number.isFinite(prompt) && this._ninferPrevPrompt != null ? prompt - this._ninferPrevPrompt : null;
+      const dCached = Number.isFinite(cached) && this._ninferPrevCached != null ? cached - this._ninferPrevCached : null;
+      const dComputed =
+        Number.isFinite(computedPrefill) && this._ninferPrevComputed != null
+          ? computedPrefill - this._ninferPrevComputed
+          : null;
+      if (dPrefillSeconds > 0) {
+        const perSecond = (n) => Math.max(0, Math.round((n / dPrefillSeconds) * 100) / 100);
+        // Headline is the COMPUTED prefill rate: prompt tokens are mostly prefix-cache
+        // hits (83-98% on this fleet), so dividing all input by prefill time reports a
+        // cache-ingestion rate that swings with hit ratio and reads absurd on a 5090.
+        // The cached share stays visible as its own series.
+        if (dComputed != null && dComputed >= 0) {
+          this.prefillTps = perSecond(dComputed);
+          this.uncachedPrefillTps = this.prefillTps;
+        } else if (dPrompt != null && dPrompt >= 0) {
+          this.prefillTps = perSecond(dPrompt);
+        }
+        if (dCached != null && dCached >= 0) this.cachedPrefillTps = perSecond(dCached);
+        this.prefillActive = true;
+      } else {
+        // No prefill work finished in this window: idle, not a zero rate to display.
+        this.prefillTps = 0;
+        this.cachedPrefillTps = 0;
+        this.uncachedPrefillTps = 0;
+        this.prefillActive = false;
+      }
+    }
+    if (Number.isFinite(pfSum)) this._ninferPrevPrefillSum = pfSum;
+    if (Number.isFinite(pfCount)) this._ninferPrevPrefillCount = pfCount;
+    if (Number.isFinite(prompt)) this._ninferPrevPrompt = prompt;
+    if (Number.isFinite(cached)) this._ninferPrevCached = cached;
+    if (Number.isFinite(computedPrefill)) this._ninferPrevComputed = computedPrefill;
+
+    // Time to first token p95 (same histogram shape as the inter-token latency).
+    const ttftHist = this._parseHistogram(
+      txt,
+      "ninfer_time_to_first_token_seconds",
+      "ninfer_time_to_first_token_seconds_count"
+    );
+    const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
+    this.ttftP95Seconds = ttftP95 == null ? null : Math.round(ttftP95 * 1000) / 1000;
+  }
+
+  /**
    * TensorFold Prometheus /metrics (`tensorfold:*`): cumulative token totals (finished requests),
    * running / waiting requests and the MTP draft acceptance rate. Best effort: a miss changes nothing.
    * Builds whose /health is only `{"status": "ok"}` (tensorfold-native) report counters here alone,
@@ -2068,8 +2240,9 @@ export class LlmProbe {
    * @param {number} [dtSec]
    * @param {boolean} [queueOnly=false] apply only the waiting gauge: for builds whose /health
    * carries the totals but no waiting count, /metrics is still the queue's only source.
+   * @param {boolean} [preserveLiveDecode=false] retain /health decode while still collecting prefill timing.
    */
-  async _applyTensorFoldMetrics(dtSec, queueOnly = false) {
+  async _applyTensorFoldMetrics(dtSec, queueOnly = false, preserveLiveDecode = false) {
     let txt;
     try {
       const res = await this._fetch(`${this.baseUrl}/metrics`);
@@ -2111,7 +2284,7 @@ export class LlmProbe {
       const produced = gen + (Number.isFinite(inFlight) && inFlight >= 0 ? inFlight : 0);
       const prev = this._tensorfoldPromProduced;
       this._tensorfoldPromProduced = produced;
-      if (prev != null && Number.isFinite(dtSec) && dtSec > 0) {
+      if (!preserveLiveDecode && prev != null && Number.isFinite(dtSec) && dtSec > 0) {
         this.generationTps = Math.max(0, Math.round(((produced - prev) / dtSec) * 100) / 100);
       }
     }
@@ -2174,7 +2347,12 @@ export class LlmProbe {
         Number.isFinite(preemptions) && preemptions >= 0 ? Math.round(preemptions) : null;
     }
 
-    const kv = queueOnly ? null : m("kv_cache_usage_ratio");
+    // A multi-pool engine exports one 0–1 ratio per pool/stream. `m()` sums every
+    // matching series, so six half-empty pools would clamp at 1 and read as "full"
+    // while every lane is mostly empty (#330). The worst lane is the number that
+    // forecasts queueing/preemption pressure; on a single-series engine max is that
+    // same value. Per-pool detail would need a separate field.
+    const kv = queueOnly ? null : this._getPromMetricMax(txt, "tensorfold:kv_cache_usage_ratio");
     if (Number.isFinite(kv) && kv >= 0) this.kvCacheUsage = Math.min(1, kv);
     const drafted = queueOnly ? null : m("mtp_drafted_total");
     const accepted = queueOnly ? null : m("mtp_accepted_total");
@@ -2235,6 +2413,8 @@ export class LlmProbe {
         const pCount = m(`${prefillPrefix}_count`);
         if (Number.isFinite(pSum) && Number.isFinite(pCount) && pSum >= 0 && pCount >= 0) {
           const prevPrompt = this._tensorfoldPromptTokens;
+          const livePrefill = this.prefillTpsSource === "live";
+          const livePrefillRate = this.prefillTps;
           const prevSum = this._tensorfoldPrefillSum;
           const prevCount = this._tensorfoldPrefillCount;
           const prevCached = this._tensorfoldCachedTokens;
@@ -2319,6 +2499,18 @@ export class LlmProbe {
           this._tensorfoldPrefillSum = pSum;
           this._tensorfoldPrefillCount = pCount;
           this._tensorfoldCachedTokens = cachedNow;
+          // Label the measurement the UI shows: a completed-window rate (split or
+          // effective), or the engine's live gauge. The re-seeding above ends the
+          // completed window, so a source that survived it is re-stated explicitly.
+          this.prefillTpsSource = split
+            ? (this._tensorfoldSplitSeen ? "completed-split" : null)
+            : this.perStreamPrefillTps != null
+              ? "completed-effective"
+              : null;
+          if (livePrefill) {
+            this.prefillTps = livePrefillRate;
+            this.prefillTpsSource = "live";
+          }
         }
       }
       // The only live prefill signal this build has: a request is open and no
@@ -2434,40 +2626,98 @@ export class LlmProbe {
       // prompt_tokens_total counts prefix-cache hits too; a 97%-cached agent
       // prompt would otherwise read as 100k+ tok/s "prefill". Only the
       // computed share is real prefill work.
+      // vLLM splits prompt tokens by source: local_compute is the share that
+      // actually ran prefill; the rest was served from prefix/external cache.
+      // prompt_tokens_total counts both, so rates derived from it are inflated
+      // whenever the prefix cache hits. Prefer this split when the engine
+      // reports it; older builds only expose the plain cached counter.
+      const srcCompute = this._getPromMetricLabeled(
+        txt, "vllm:prompt_tokens_by_source_total", "source", "local_compute");
+      const srcHit = this._getPromMetricLabeled(
+        txt, "vllm:prompt_tokens_by_source_total", "source", "local_cache_hit");
+      const srcExternal = this._getPromMetricLabeled(
+        txt, "vllm:prompt_tokens_by_source_total", "source", "external_kv_transfer");
+      const bySource = srcCompute != null && srcHit != null;
+      // vLLM advances its prompt/compute counters when a request finishes, so a
+      // delta over the poll window is a completion burst, not a rate. The engine
+      // also publishes prefill seconds and computed tokens per finished request;
+      // divide those to get the rate the prefill actually ran at.
+      const prefillCount = this._getVllmMetric(txt, "request_prefill_time_seconds_count");
+      const prefillTime = this._getVllmMetric(txt, "request_prefill_time_seconds_sum");
+      const kvComputed = this._getVllmMetric(txt, "request_prefill_kv_computed_tokens_sum");
+      const cacheServed = srcHit ?? cachedTok;
+      const hasPrefillTiming =
+        prefillCount != null && prefillTime != null && kvComputed != null && cacheServed != null;
+      let completedPrefill = false;
+      if (hasPrefillTiming) {
+        const lastPrefill = this._lastPrefillTotals;
+        if (lastPrefill != null && prefillCount > lastPrefill.count) {
+          const dPrefillTime = prefillTime - lastPrefill.time;
+          const dKvComputed = kvComputed - lastPrefill.kv;
+          const dCacheServed = cacheServed - lastPrefill.cache;
+          if (dPrefillTime > 0 && dKvComputed >= 0 && dCacheServed >= 0) {
+            const prefillRate = Math.max(0, Math.round((dKvComputed / dPrefillTime) * 100) / 100);
+            this.prefillTps = prefillRate;
+            this.uncachedPrefillTps = prefillRate;
+            this.cachedPrefillTps = Math.max(0, Math.round((dCacheServed / dPrefillTime) * 100) / 100);
+            completedPrefill = true;
+          }
+        }
+        this._lastPrefillTotals = {
+          count: prefillCount, time: prefillTime, kv: kvComputed, cache: cacheServed,
+        };
+      }
       const prevCached = this.lastPrefillKinds?.cached;
       const deltaCached =
         cachedTok != null && prevCached != null ? Math.max(0, cachedTok - prevCached) : 0;
-      const deltaComputedIn = Math.max(0, deltaIn - deltaCached);
-      this._setPrefillSplitRates(
-        cachedTok,
-        cachedTok != null ? Math.max(0, promptTokens - cachedTok) : null,
-        dtSec
-      );
+      const deltaComputedIn =
+        bySource && this.lastPromptCompute != null
+          ? Math.max(0, srcCompute - this.lastPromptCompute)
+          : Math.max(0, deltaIn - deltaCached);
+      if (bySource) this.lastPromptCompute = srcCompute;
+      else this.lastPromptCompute = null;
+      if (!hasPrefillTiming) {
+        this._setPrefillSplitRates(
+          bySource ? srcHit + (srcExternal ?? 0) : cachedTok,
+          bySource
+            ? srcCompute
+            : cachedTok != null
+              ? Math.max(0, promptTokens - cachedTok)
+              : null,
+          dtSec
+        );
+      }
       const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
       const deltaIter =
         iterSum != null && this.lastIterSum != null ? iterSum - this.lastIterSum : 0;
       if (seeded && dtSec > 0 && dtSec < 10) {
         this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-        const deltaTtft =
-          ttftSum != null && this.lastTtftSum != null ? ttftSum - this.lastTtftSum : 0;
-        // Engine-step tokens include prefill+decode. Surplus over generation is
-        // prefill, including the common case where a short/cached prefill lands
-        // in the same poll as the first decode tokens.
-        const prefillIter = Math.max(0, deltaIter - Math.max(0, deltaOut));
-        const specNoise = deltaOut > 0 && prefillIter > 0 && prefillIter < deltaOut * 0.5;
-        const livePrefill =
-          prefillIter > 0 && !specNoise ? prefillIter / dtSec : 0;
-        const finishedPrefill =
-          deltaComputedIn > 0 && deltaTtft > 0
-            ? deltaComputedIn / deltaTtft
-            : deltaComputedIn > 0 && livePrefill <= 0
-              ? deltaComputedIn / dtSec
-              : 0;
-        this.prefillTps = Math.max(
-          0,
-          Math.round((livePrefill > 0 ? livePrefill : finishedPrefill) * 100) / 100
-        );
+        if (!hasPrefillTiming) {
+          const deltaTtft =
+            ttftSum != null && this.lastTtftSum != null ? ttftSum - this.lastTtftSum : 0;
+          // Engine-step tokens include prefill+decode. Surplus over generation is
+          // prefill, including the common case where a short/cached prefill lands
+          // in the same poll as the first decode tokens.
+          const prefillIter = Math.max(0, deltaIter - Math.max(0, deltaOut));
+          const specNoise = deltaOut > 0 && prefillIter > 0 && prefillIter < deltaOut * 0.5;
+          const livePrefill =
+            prefillIter > 0 && !specNoise ? prefillIter / dtSec : 0;
+          const finishedPrefill =
+            deltaComputedIn > 0 && deltaTtft > 0
+              ? deltaComputedIn / deltaTtft
+              : deltaComputedIn > 0 && livePrefill <= 0
+                ? deltaComputedIn / dtSec
+                : 0;
+          this.prefillTps = Math.max(
+            0,
+            Math.round((livePrefill > 0 ? livePrefill : finishedPrefill) * 100) / 100
+          );
+        }
       }
+      // An open request that has not produced a decode token yet is in prefill;
+      // the card shows "prefilling" instead of a zero rate.
+      this.prefillActive =
+        Number.isFinite(running) && running > 0 && deltaOut <= 0 && !completedPrefill;
       // Live mean TTFT over the last poll window from histogram sum/count deltas.
       // Computed BEFORE lastTtftSum is advanced so the delta is real, not 0.
       const ttftCount = this._getVllmMetric(txt, "time_to_first_token_seconds_count");
@@ -2490,6 +2740,15 @@ export class LlmProbe {
 
     this.requestsRunning = running;
     if (running != null) this.slotsActive = Math.round(running);
+    if (Number.isFinite(running) && running > 0) {
+      if (this._runningSince == null) this._runningSince = Date.now();
+    } else {
+      this._runningSince = null;
+    }
+    this.inFlightSeconds =
+      this._runningSince == null
+        ? null
+        : Math.round((Date.now() - this._runningSince) / 100) / 10;
 
     if (this.gpuMemoryUtilization == null) {
       const sleepState = this._getVllmMetric(txt, "engine_sleep_state");
@@ -3411,6 +3670,7 @@ export class LlmProbe {
       generationTps: this.generationTps,
       perStreamTps: this.perStreamTps,
       perStreamPrefillTps: this.perStreamPrefillTps,
+      prefillTpsSource: this.prefillTpsSource,
       prefillTps: this.prefillTps,
       decodeActive: this.decodeActive === true,
       generationTpsSource: this.generationTpsSource,
@@ -3429,6 +3689,7 @@ export class LlmProbe {
       requestsRunning: this.requestsRunning,
       requestsWaiting: this.requestsWaiting,
       ttftP95Seconds: this.ttftP95Seconds,
+      inFlightSeconds: this.inFlightSeconds,
       ttftSeconds: this.ttftSeconds,
       preemptionsTotal: this.preemptionsTotal,
       prefixCacheHitRate: this.prefixCacheHitRate,
@@ -3458,6 +3719,7 @@ export class LlmProbe {
       generationTps: 0,
       perStreamTps: null,
       perStreamPrefillTps: null,
+      prefillTpsSource: null,
       prefillTps: 0,
       decodeActive: false,
       generationTpsSource: null,
