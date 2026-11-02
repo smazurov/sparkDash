@@ -214,17 +214,6 @@ describe("Energy page", () => {
     expect(container.textContent).not.toContain("Home Assistant");
   });
 
-  it("falls back to the meter type when an older server sends no label", async () => {
-    const older = { ...status, meters: [{ ...(status.enabled ? status.meters[0] : ({} as never)), label: undefined }] } as unknown as PowerMeterStatus;
-    vi.mocked(fetchPowerMeterStatus).mockResolvedValue(older);
-    vi.mocked(fetchFleetEnergy).mockResolvedValue(live(wall));
-    vi.mocked(fetchEnergyHistory).mockResolvedValue(history(true));
-    const { container } = render(<EnergyPage sparks={sparks} settings={null} />);
-    await settle();
-    expect(container.textContent).toContain("Measured at the wall by homeassistant.");
-    expect(container.querySelector(".en-meter-chip")?.textContent).toBe("homeassistant");
-  });
-
   it("warns, and turns the chip red, when the meter stops reading", async () => {
     const broken: PowerMeterStatus = {
       ...status,

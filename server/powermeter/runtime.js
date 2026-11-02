@@ -87,7 +87,7 @@ export function createPowerMeterRuntime({
       id,
       type: spec.type,
       // The provider names itself; known even when it could not start.
-      label: providerClass(spec.type)?.label || spec.type,
+      label: providerClass(spec.type).label,
       provider: null,
       error: null,
       health: "pending",
@@ -100,7 +100,7 @@ export function createPowerMeterRuntime({
       const provider = createProviderFn(spec, { env, logger });
       if (!(provider instanceof PowerMeterProvider)) throw new Error("provider does not extend PowerMeterProvider");
       meter.provider = provider;
-      meter.label = provider.label || meter.label;
+      meter.label = provider.label;
     } catch (error) {
       meter.error = error.message;
       meter.health = "unavailable";

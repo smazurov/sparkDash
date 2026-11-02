@@ -2,11 +2,6 @@ import type { PowerMeterMeterStatus, PowerMeterStatus } from "../../api/powerMet
 import { activeTimeZone } from "../../shared/timeZone";
 import { Tag, type TagTone } from "../ui/Tag";
 
-/** The provider's own name for a meter; its type if the server is too old to send one. */
-export function meterLabel(m: Pick<PowerMeterMeterStatus, "label" | "type">): string {
-  return m.label || m.type;
-}
-
 function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: activeTimeZone() });
 }
@@ -43,7 +38,7 @@ export function MeterChips({ status, nameOf }: { status: PowerMeterStatus | null
           .join(" · ");
         return (
           <Tag key={m.id} tone={tone} title={title} className="en-meter-chip">
-            {meterLabel(m)}
+            {m.label}
             {suffix}
           </Tag>
         );
@@ -64,7 +59,7 @@ export function MeterAlert({ status }: { status: PowerMeterStatus | null }) {
   if (!issues.length) return null;
   return (
     <p className="en-banner en-banner--warn" role="alert">
-      {issues.map(([m, p]) => `${meterLabel(m)}: ${p}`).join("; ")}. Missing readings are filled from the estimate.
+      {issues.map(([m, p]) => `${m.label}: ${p}`).join("; ")}. Missing readings are filled from the estimate.
     </p>
   );
 }

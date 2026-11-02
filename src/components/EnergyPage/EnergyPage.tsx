@@ -8,7 +8,7 @@ import { StackedBarChart, type BarBucket, type BarSeries } from "../ui/StackedBa
 import { LineAreaChart, type LineOverlay, type LinePoint } from "../ui/LineAreaChart";
 import { Tag } from "../ui/Tag";
 import { MonthlyEnergy } from "./MonthlyEnergy";
-import { MeterAlert, MeterChips, meterLabel as labelOf } from "./MeterStatus";
+import { MeterAlert, MeterChips } from "./MeterStatus";
 import { filledShare, formatRatio, hasWall, hourLines, nodeParts, wallRows, type HourLines, type NodeParts } from "./wallStats";
 import { usePowerMeterStatus } from "../../hooks/usePowerMeters";
 import {
@@ -152,7 +152,7 @@ export function EnergyPage({
 
   const meterStatus = usePowerMeterStatus();
   const metered = hasWall(history);
-  const meterLabel = meterStatus?.enabled ? [...new Set(meterStatus.meters.map(labelOf))].join(" and ") : "external power meters";
+  const meterLabel = meterStatus?.enabled ? [...new Set(meterStatus.meters.map((m) => m.label))].join(" and ") : "external power meters";
 
   const model = useMemo(() => {
     if (!history || history.membershipChanged) return null;

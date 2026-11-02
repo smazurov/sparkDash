@@ -15,7 +15,7 @@ function load(): Promise<PowerMeterStatus | null> {
         cached = status;
         return status;
       })
-      // An older server has no such route: treat it as "not configured".
+      // A failed request keeps the last status (null until one arrives).
       .catch(() => cached)
       .finally(() => {
         inflight = null;
