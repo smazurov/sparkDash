@@ -408,7 +408,7 @@ const GPU_METRIC_FIELDS = ["temperature", "usage", "powerDraw", "powerLimit", "v
 const AMD_GPU_INDEX_OFFSET = 1000;
 const INTEL_GPU_INDEX_OFFSET = 2000;
 
-function tagCollectionResult(result, successful) {
+export function tagCollectionResult(result, successful) {
   Object.defineProperty(result, COLLECTION_SUCCESS, {
     value: successful === true,
     enumerable: false,
@@ -498,8 +498,9 @@ const REMOTE_IO_MARKER = "---sparkdash-block-io---";
 const DISK_RATE_MIN_WINDOW_MS = 250;
 
 export class SystemCollector {
-  constructor(spark) {
+  constructor(spark, { exec = sshExec } = {}) {
     this.spark = spark;
+    this._sshExec = exec;
     this._nvidiaSmiPath = this._resolveNvidiaSmiPath();
 
     // Rate-tracking baselines
@@ -785,7 +786,7 @@ export class SystemCollector {
     const nvidiaDevices = this._parseGpuLines(gpuOut ?? "");
     this._applyClockCap(nvidiaDevices, clockCapMHz);
     const intelDevices = this._intelDevices(this._sampleIntel(intelOut, vramRead));
-    const amdDevices = this._amdLocalDevices();
+    const amdDevices = await this._amdLocalDevices();
     const otherDevices = [...amdDevices, ...intelDevices];
     // nvidia-smi failing is normal on a host without NVIDIA; installed-but-failing next to an Intel card is not.
     const nvidiaFailed = gpuOut === null && intelDevices.length > 0 && (await this._nvidiaSmiInstalled());
@@ -815,6 +816,7 @@ export class SystemCollector {
       usage: gpu.usage,
       power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
       vram,
+      memoryModel: devices.length === 1 ? devices[0].memoryModel : undefined,
       processes,
       throttle: gpu.throttle,
       nvErrNoMemory: await this._nvErrNoMemory(),
@@ -852,12 +854,14 @@ export class SystemCollector {
    * shell, no vendor tool, nothing to install. Empty when no card is bound to amdgpu or
    * sysfs cannot be read.
    */
-  _amdLocalDevices() {
+  async _amdLocalDevices() {
     if (process.platform !== "linux") return [];
     const root = this._sysRoots().find((r) => fs.existsSync(path.join(r, "class/drm")));
     if (!root) return [];
     try {
-      return this._amdDevices(collectAmdSysfs({ root }));
+      const cards = collectAmdSysfs({ root });
+      const meminfo = cards.length ? await this._readHostFile("/proc/meminfo").catch(() => "") : "";
+      return this._amdDevices(cards, meminfo);
     } catch {
       return [];
     }
@@ -867,8 +871,8 @@ export class SystemCollector {
    * Card readings as devices: AMD keeps its own index range (like Intel), and the clock
    * ceiling from pp_dpm_sclk feeds the same throttle view the other vendors get.
    */
-  _amdDevices(cards) {
-    return amdDevicesFromCards(cards).map((device) => ({
+  _amdDevices(cards, meminfo = "") {
+    return amdDevicesFromCards(cards, meminfo).map((device) => ({
       ...device,
       index: AMD_GPU_INDEX_OFFSET + device.index,
       throttle: this._buildThrottle({ smClockMHz: device.smClockMHz, smClockMaxMHz: device.smClockMaxMHz }),
@@ -990,15 +994,22 @@ export class SystemCollector {
       used: devices.some((d) => d.metricAvailability?.vramUsed)
         ? devices.reduce((sum, d) => sum + (d.metricAvailability?.vramUsed ? d.vram.used : 0), 0) : 0,
       total: available.reduce((sum, d) => sum + d.vram.total, 0),
-      available: available.reduce((sum, d) => sum + d.vram.available, 0),
+      available: available.some((d) => d.vram.available == null)
+        ? null : available.reduce((sum, d) => sum + d.vram.available, 0),
+      ...(devices.length === 1 && devices[0].memoryModel === "unified"
+        ? { systemUsed: devices[0].vram.systemUsed } : {}),
     };
   }
 
   _combineVram(a, b) {
     const used = (a?.used || 0) + (b?.used || 0);
     const total = (a?.total || 0) + (b?.total || 0);
-    const available = (a?.available || 0) + (b?.available || 0);
-    return { used, total, percentage: total > 0 ? Math.round((used / total) * 100) : 0, available };
+    const available = a?.available == null || b?.available == null
+      ? null : a.available + b.available;
+    return {
+      used, total, percentage: total > 0 ? Math.round((used / total) * 100) : 0, available,
+      ...(a?.total === 0 && Object.hasOwn(b, "systemUsed") ? { systemUsed: b.systemUsed } : {}),
+    };
   }
 
   /**
@@ -2043,7 +2054,7 @@ export class SystemCollector {
   }
 
   // ─── Remote collection via SSH ────────────────────────────
-  async _getRemoteGpu(executor = sshExec) {
+  async _getRemoteGpu(executor = this._sshExec) {
     try {
       const vramRead = this._intelVram.stale;
       const cmd = [
@@ -2074,7 +2085,7 @@ export class SystemCollector {
       this._applyClockCap(cliDevices, parseClockCap(clockCapOut));
       const perDeviceVram = this._parseVramLines(legacy ? (legacySections[1] || "") : memFields);
       const apps = this._parseComputeApps(legacy ? (legacySections[2] || "") : computeOut);
-      const amdDevices = legacy ? [] : this._amdDevices(parseAmdProbe(amdProbe));
+      const amdDevices = legacy ? [] : this._amdDevices(parseAmdProbe(amdProbe), resolvedMeminfo);
       // Probe output only exists in the section format; legacy fixtures carry no Intel data.
       const intelDevices = this._intelDevices(this._sampleIntel(legacy ? "" : intelOut, vramRead));
       const otherDevices = [...amdDevices, ...intelDevices];
@@ -2141,6 +2152,8 @@ export class SystemCollector {
         else if (cliDevices.length && totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024;
         if (!cliDevices.length && otherDevices.length) availableMB = Math.round(otherVram.available || 0);
       }
+      const memoryModel = gpuDevices.length === 1 ? gpuDevices[0].memoryModel : undefined;
+      if (memoryModel === "unified") availableMB = gpuDevices[0].vram.available;
       const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
 
       if (this.isWindows) {
@@ -2159,13 +2172,17 @@ export class SystemCollector {
       // Top 5 GPU processes by VRAM usage (a PID spanning several GPUs is summed)
       const cachedApps = this._cachedApps();
       const processes = this._topProcesses(cachedApps);
-      const vram = { used: usedMB, total: totalMB, percentage, available: availableMB };
+      const vram = {
+        used: usedMB, total: totalMB, percentage, available: availableMB,
+        ...(memoryModel === "unified" ? { systemUsed: gpuDevices[0].vram.systemUsed } : {}),
+      };
 
       return markNvidiaSideFailed({
         temperature: gpu.temperature,
         usage: gpu.usage,
         power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
         vram,
+        memoryModel,
         processes,
         throttle: gpu.throttle,
         nvErrNoMemory: await this._nvErrNoMemory(),
@@ -2301,7 +2318,7 @@ export class SystemCollector {
   async _getRemoteRam() {
     try {
       const cmd = "grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null";
-      const output = await sshExec(this.spark, cmd);
+      const output = await this._sshExec(this.spark, cmd);
       const totalMatch = output.match(/MemTotal:\s+(\d+)\s+kB/);
       const availMatch = output.match(/MemAvailable:\s+(\d+)\s+kB/);
       const totalKB = totalMatch ? parseInt(totalMatch[1]) : 0;
@@ -2318,7 +2335,7 @@ export class SystemCollector {
     }
   }
 
-  async _getRemoteStorage(execute = sshExec) {
+  async _getRemoteStorage(execute = this._sshExec) {
     try {
       // Include root (/); exclude pseudo filesystems via -x and type filter. The block devices'
       // cumulative sector counters ride in the same round trip, after a marker line.
@@ -2663,7 +2680,7 @@ export class SystemCollector {
     }
   }
 
-  async _getRemoteNetwork(execute = sshExec) {
+  async _getRemoteNetwork(execute = this._sshExec) {
     try {
       const cmd = [
         "cat /proc/net/dev 2>/dev/null",
@@ -2788,7 +2805,7 @@ export class SystemCollector {
         "nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null",
       ].join("; ");
 
-      const output = await sshExec(this.spark, cmd);
+      const output = await this._sshExec(this.spark, cmd);
       const sections = output.split("---");
       const memOut = sections[0]?.trim() || "";
       const computeOut = sections[1]?.trim() || "";
@@ -3185,7 +3202,7 @@ export class SystemCollector {
         meminfo = results[2];
         coresParsed = (cpuinfo.match(/processor\s*:/g) || []).length;
       } else {
-        const out = await sshExec(this.spark, [
+        const out = await this._sshExec(this.spark, [
           "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader,nounits 2>/dev/null",
           "echo '---'",
           "grep -E '^model name' /proc/cpuinfo | head -1",

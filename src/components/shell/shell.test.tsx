@@ -51,6 +51,7 @@ describe("AppSidebar", () => {
         activeId="b"
         onSelect={() => {}}
         onAdd={() => {}}
+        onReorder={() => {}}
         onOpenSettings={() => {}}
         onOpenSearch={() => {}}
         connected
@@ -59,6 +60,15 @@ describe("AppSidebar", () => {
     expect(container.querySelector('nav[aria-label="Sparks"]')?.textContent).toContain("Spark a");
     expect(container.querySelector('[aria-current="page"]')?.textContent).toContain("Spark b");
     expect(railSubLabel(sparks[1])).toBe("off");
+    expect(container.querySelector('nav[aria-label="Sparks"] [aria-current="page"]')?.getAttribute("title")).toContain("(offline)");
+  });
+
+  it("shows the opt-in API Keys entry only when enabled", () => {
+    const props = { sparks: [makeSpark()], activeId: null, onSelect: vi.fn(), onAdd: vi.fn(), onOpenSettings: vi.fn(), onOpenSearch: vi.fn(), connected: true };
+    const off = render(<AppSidebar {...props} />);
+    expect(off.container.querySelector('a[href="/api-keys"]')).toBeNull();
+    const on = render(<AppSidebar {...props} showApiKeys />);
+    expect(on.container.querySelector('a[href="/api-keys"]')?.textContent).toContain("API Keys");
   });
 
   it("links the Temps page with a deep-linkable href", () => {
@@ -187,6 +197,15 @@ describe("CommandPalette accessibility", () => {
     });
     expect(input().getAttribute("aria-activedescendant")).toBe(document.querySelectorAll('[role="option"]')[1].id);
     expect(document.querySelectorAll('[role="option"]')[1].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("applies two ArrowDown keydowns from one React batch", () => {
+    render(<CommandPalette open onClose={() => {}} commands={[...cmds, cmd("c", "Temps")]} />);
+    act(() => {
+      input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(input().getAttribute("aria-activedescendant")).toBe(document.querySelectorAll('[role="option"]')[2].id);
   });
 
   it("ignores Enter while an IME is composing", () => {

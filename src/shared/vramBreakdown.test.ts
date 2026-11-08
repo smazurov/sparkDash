@@ -211,6 +211,28 @@ describe("computeVramBreakdown", () => {
     expect(verdict(b)).toBe("Plenty of headroom");
   });
 
+  it("carries an AMD APU's physical headroom into the shared-memory breakdown", () => {
+    const unit = {
+      id: "apu", kind: "host", platform: "linux",
+      metrics: {
+        gpu: { memoryModel: "unified" as const },
+        unifiedMemory: { total: 999999, gpuUsed: 0, cpuUsed: 0, available: 999999 },
+      },
+    };
+    const ctx = vramContextFor(unit, []);
+    expect(ctx.model).toBe("unified");
+    expect(ctx.unified).toBeNull(); // the separate Linux memory collector is NVIDIA-specific
+    const b = computeVramBreakdown({
+      total: 128512, used: 28007, available: 1024, systemUsed: 99481,
+    }, [], ctx)!;
+    expect(b.freeMB).toBe(1024);
+    expect(b.systemMB).toBe(99481);
+    expect(b.usedMB).toBe(127488);
+    expect(b.tone).toBe("critical");
+    expect(computeVramBreakdown({ total: 128512, used: 28007, available: null }, [], ctx)).toBeNull();
+    expect(computeVramBreakdown({ total: 128512, used: 28007, available: 0 }, [], ctx)!.freeMB).toBe(0);
+  });
+
   it("takes discrete headroom as total − used, not the collector's system-RAM fallback", () => {
     // The host collector leaves MemAvailable in vram.available while no GPU process runs.
     const b = computeVramBreakdown(

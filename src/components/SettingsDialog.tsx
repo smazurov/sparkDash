@@ -551,6 +551,12 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
                 checked={Boolean(settings.mqttEnabled)}
                 onChange={(v) => update({ mqttEnabled: v })}
               />
+              <ToggleRow
+                title="API Keys page"
+                help="Read-only view of LiteLLM virtual keys, served by a host-side bridge on a unix socket. Off by default; needs SPARKDASH_APIKEYS_BRIDGE_SOCKET and SPARKDASH_APIKEYS_BRIDGE_TOKEN in the server's environment. See the README's API Keys section."
+                checked={Boolean(settings.apiKeysEnabled)}
+                onChange={(v) => update({ apiKeysEnabled: v })}
+              />
               <SettingRow
                 title={t("mqtt.url.title")}
                 help={t("mqtt.url.help")}
@@ -596,6 +602,28 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
                   spellCheck={false}
                   autoComplete="off"
                   onChange={(e) => update({ mqttTopicPrefix: e.target.value })}
+                  className="field-input"
+                />
+              </SettingRow>
+              <ToggleRow
+                title={t("mqtt.discovery.title")}
+                help={t("mqtt.discovery.help")}
+                checked={Boolean(settings.mqttDiscovery)}
+                onChange={(v) => update({ mqttDiscovery: v })}
+              />
+              <SettingRow
+                title={t("mqtt.discoveryPrefix.title")}
+                help={t("mqtt.discoveryPrefix.help")}
+                htmlFor="settings-mqtt-discovery-prefix"
+              >
+                <input
+                  id="settings-mqtt-discovery-prefix"
+                  type="text"
+                  value={settings.mqttDiscoveryPrefix ?? ""}
+                  placeholder="homeassistant"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => update({ mqttDiscoveryPrefix: e.target.value })}
                   className="field-input"
                 />
               </SettingRow>

@@ -53,3 +53,10 @@ config/metrics-history.json.corrupt-*
 config/fleet-energy.scope-*.json
 config/*.tmp
 config/*.json.*.tmp
+__pycache__/
+*.pyc
+
+# Keep only the unified localization inventory under version control.
+!/docs/
+/docs/*
+!/docs/I18N-COVERAGE.md

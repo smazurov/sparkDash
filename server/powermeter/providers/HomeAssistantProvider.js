@@ -19,9 +19,9 @@
  */
 import dns from "node:dns/promises";
 import WebSocket from "ws";
-import { channelHost, pinnedLookup } from "../../alerts/outbound.js";
+import { channelHost } from "../../alerts/outbound.js";
 import { fetchPinned } from "../../occupancy/pinnedFetch.js";
-import { assertAllowedTarget, isAllowedTargetHost } from "../../validate.js";
+import { assertAllowedTarget, isAllowedTargetHost, pinnedLookup } from "../../validate.js";
 import { PowerMeterProvider } from "./PowerMeterProvider.js";
 
 const ENTITY_PATTERN = /^[a-z0-9_]+\.[a-z0-9_]+$/;
@@ -216,7 +216,7 @@ export class HomeAssistantProvider extends PowerMeterProvider {
     if (typeof token !== "string" || token.trim() === "") {
       throw new Error(`environment variable ${TOKEN_ENV} is not set`);
     }
-    this.#token = token;
+    this.#token = token.trim();
     this.#base = String(spec.url).replace(/\/+$/, "");
     this.#host = channelHost(new URL(this.#base));
     this.#wsUrl = `${this.#base.replace(/^http/, "ws")}/api/websocket`;
