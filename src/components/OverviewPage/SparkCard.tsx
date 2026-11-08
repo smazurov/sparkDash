@@ -495,8 +495,8 @@ function SparkCardImpl({
                     : undefined
                 }
               >
-                <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isTensorFold || isHalogen ? t("card.decodeAggregate") : t("card.decode")}</div>
-                {llm.measurementValid === false || llm.generationMeasurementValid === false || (isHalogen && llm.generationTps <= 0) ? (
+                <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isHalogen ? t("card.decodeCounterWindow") : isTensorFold ? t("card.decodeAggregate") : t("card.decode")}</div>
+                {llm.measurementValid === false || llm.generationMeasurementValid === false ? (
                   <div className="big-num ov-tps__num" title={llm.measurementError ?? (isHalogen ? t("card.halogenRatesHelp") : t("card.statsCouldNotBeRead"))}>—</div>
                 ) : isStrata && llm.decodeActive && llm.generationTps <= 0 ? (
                   <div className="big-num ov-tps__num ov-tps__num--live">
@@ -506,6 +506,7 @@ function SparkCardImpl({
                 ) : (
                   <div className="big-num ov-tps__num">{llm.generationTps.toFixed(1)}<small>{t("card.tokPerSecond")}</small></div>
                 )}
+                {isHalogen && <small className="text-muted">{llm.measurementValid !== false && llm.generationMeasurementValid !== false ? t("card.completionDelayed") : t("card.collectingWindow")}</small>}
                 {isStrata && llm.generationTpsSource === "slot-mean" && <small className="text-muted">{t("card.activeSlotMean")}</small>}
                 {llm.measurementValid !== false && llm.perStreamTps != null && (
                   <small

@@ -125,7 +125,7 @@ test("Halogen still detects when /slots is disabled", async (t) => {
   assert.equal((await poll()).backend, "halogen");
 });
 
-test("prefill uses engine time while completed output stays a total, never aggregate TPS", async (t) => {
+test("prefill uses engine time while decode warms up, never a scrape-interval spike", async (t) => {
   const { state, poll } = setup(t);
   await poll();
   finish(state);
@@ -149,38 +149,42 @@ test("prefill uses engine time while completed output stays a total, never aggre
   assert.equal(idle.prefillMeasuredAt, snap.prefillMeasuredAt);
 });
 
-test("concurrent completions never become aggregate TPS or a substituted per-stream statistic", async (t) => {
+test("concurrent completions produce aggregate wall-window TPS, independent of overlapping request seconds or occupancy", async (t) => {
   const { state, poll } = setup(t);
   await poll();
-  // Four overlapping requests: summed decode durations are not elapsed wall time.
+  for (let i = 0; i < 30; i++) await poll();
   for (const running of [4, 2, 0]) {
     state.metrics["llamacpp:requests_processing"] = running;
-    state.metrics["llamacpp:tokens_predicted_total"] += 7343;
-    state.metrics["llamacpp:tokens_predicted_seconds_total"] += 291;
+    state.metrics["llamacpp:tokens_predicted_total"] += 2000;
+    state.metrics["llamacpp:tokens_predicted_seconds_total"] += 80;
     const snap = await poll();
+    const tokens = state.metrics["llamacpp:tokens_predicted_total"] - defaults["llamacpp:tokens_predicted_total"];
     assert.equal(snap.measurementValid, true);
-    assert.equal(snap.generationMeasurementValid, false);
-    assert.equal(snap.generationTps, 0); // unmeasured sentinel, never exported/charted
-    assert.equal(snap.generationTpsSource, null);
-    assert.equal(snap.perStreamTps, null); // do not relocate the rejected statistic
+    assert.equal(snap.generationMeasurementValid, true);
+    assert.equal(snap.generationTps, Math.round(tokens / 60 * 100) / 100);
+    assert.equal(snap.generationTpsSource, "completed-window");
+    assert.equal(snap.generationWindowSeconds, 60);
+    assert.equal(snap.perStreamTps, null);
     assert.equal(snap.decodeActive, false);
-    assert.equal(snap.totalOutputTokens, state.metrics["llamacpp:tokens_predicted_total"]);
   }
 });
 
-test("completed output advances activity without creating aggregate throughput", async (t) => {
+test("completion activity stays fixed while decode warms up, holds, then becomes an observed zero", async (t) => {
   const { state, poll } = setup(t);
   await poll();
-  state.metrics["llamacpp:tokens_predicted_total"] += 2;
-  state.metrics["llamacpp:tokens_predicted_seconds_total"] += 0.0319;
+  state.metrics["llamacpp:tokens_predicted_total"] += 600;
   const first = await poll();
   assert.equal(first.generationMeasurementValid, false);
   assert.equal(first.generationMeasuredAt, 104000);
-  for (let i = 0; i < 13; i++) {
-    const snap = await poll(5000);
-    assert.equal(snap.generationMeasurementValid, false);
-    assert.equal(snap.generationMeasuredAt, first.generationMeasuredAt);
-  }
+  let snap;
+  for (let i = 0; i < 29; i++) snap = await poll();
+  assert.equal(snap.generationMeasurementValid, true);
+  assert.equal(snap.generationTps, 10);
+  assert.equal(snap.generationMeasuredAt, first.generationMeasuredAt);
+  snap = await poll();
+  assert.equal(snap.generationMeasurementValid, true);
+  assert.equal(snap.generationTps, 0);
+  assert.equal(snap.generationMeasuredAt, first.generationMeasuredAt);
 });
 
 test("prefill window sums tokens/time, holds across polls and expires samples at 60 seconds", async (t) => {
@@ -268,8 +272,18 @@ test("completed-rate history/export is a gap until measured, retained for the wi
   for (let i = 0; i < 30; i++) {
     const measured = record(snap);
     assert.equal(measured.history[llmKey(8731, "genTps")], undefined);
-    assert.doesNotMatch(measured.prom, /^sparkdash_llm_generation_tokens_per_second\{/m);
-    assert.equal(measured.compact.llm[0].generation_tokens_per_second, undefined);
+    if (snap.generationMeasurementValid) {
+      assert.equal(snap.generationTps, 8.33);
+      assert.equal(measured.history[llmKey(8731, "genTpsWall")], 8.33);
+      assert.match(measured.prom, /^sparkdash_llm_generation_tokens_per_second\{[^\n]*\} 8.33$/m);
+      assert.equal(measured.compact.llm[0].generation_tokens_per_second, 8.33);
+      assert.equal(measured.compact.llm[0].generation_window_seconds, 60);
+      assert.equal(measured.compact.llm[0].generation_rate_source, "completed-window");
+    } else {
+      assert.equal(measured.history[llmKey(8731, "genTpsWall")], undefined);
+      assert.doesNotMatch(measured.prom, /^sparkdash_llm_generation_tokens_per_second\{/m);
+      assert.equal(measured.compact.llm[0].generation_tokens_per_second, undefined);
+    }
     assert.equal(measured.history[llmKey(8731, "prefillTps")], 1630.7);
     assert.match(measured.prom, /^sparkdash_llm_prefill_tokens_per_second\{[^\n]*\} 1630.7$/m);
     assert.equal(measured.compact.llm[0].prefill_tokens_per_second, 1630.7);
@@ -277,16 +291,17 @@ test("completed-rate history/export is a gap until measured, retained for the wi
   }
   const expired = record(snap);
   assert.equal(expired.history[llmKey(8731, "genTps")], undefined);
-  assert.equal(expired.compact.llm[0].generation_tokens_per_second, undefined);
-  assert.doesNotMatch(expired.prom, /^sparkdash_llm_generation_tokens_per_second\{/m);
+  assert.equal(expired.compact.llm[0].generation_tokens_per_second, 0);
+  assert.equal(expired.history[llmKey(8731, "genTpsWall")], 0);
+  assert.match(expired.prom, /^sparkdash_llm_generation_tokens_per_second\{[^\n]*\} 0$/m);
   assert.equal(expired.history[llmKey(8731, "prefillTps")], undefined);
   assert.equal(expired.history[llmKey(8731, "kvUsage")], 0.5);
   assert.equal(expired.compact.llm[0].prefill_tokens_per_second, undefined);
   assert.doesNotMatch(expired.prom, /^sparkdash_llm_prefill_tokens_per_second\{/m);
   daily.flush();
-  const persisted = new LlmDailyStore(file).getSeries("fixture", 8731, { days: 1, now: date });
-  assert.equal(persisted.days[0].decodeMax, 0);
-  assert.equal(persisted.days[0].decodeAvg, null);
+  const persisted = new LlmDailyStore(file).getSeries("fixture", 8731, { days: 1, now: date, completedWindow: true });
+  assert.equal(persisted.days[0].decodeMax, 8.33);
+  assert.equal(persisted.days[0].decodeAvg, 8.33);
   assert.equal(persisted.days[0].prefillMax, 1630.7);
   assert.equal(persisted.days[0].prefillAvg, 1630.7);
 });
@@ -335,8 +350,9 @@ test("missing or invalid optional metrics clear old readings, health is the queu
 test("restart, model/version changes and clock gaps rebase without rate spikes", async (t) => {
   const { state, poll } = setup(t);
   await poll();
+  for (let i = 0; i < 30; i++) await poll();
   finish(state);
-  assert.equal((await poll()).generationMeasurementValid, false);
+  assert.equal((await poll()).generationTps, 8.33);
   state.metrics = { ...defaults };
   assert.equal((await poll()).measurementValid, false);
   finish(state);
@@ -364,8 +380,9 @@ for (const failure of [500, 401, 403, "timeout", "html", "missing", "negative", 
   test(`failed metrics (${failure}) cannot retain rates and recovery only seeds`, async (t) => {
     const { state, poll } = setup(t);
     await poll();
+    for (let i = 0; i < 30; i++) await poll();
     finish(state);
-    assert.equal((await poll()).generationMeasurementValid, false);
+    assert.equal((await poll()).generationTps, 8.33);
     if ([500, 401, 403, "timeout"].includes(failure)) state.status["/metrics"] = failure;
     else if (failure === "html") state.body = "<html>not metrics</html>";
     else state.metrics["llamacpp:tokens_predicted_total"] = ({ missing: undefined, negative: -1, NaN: "NaN", Infinity: "+Inf" })[failure];

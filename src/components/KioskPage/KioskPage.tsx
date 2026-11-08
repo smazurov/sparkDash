@@ -214,7 +214,7 @@ const KioskCardView = memo(function KioskCardView({
               <Stat label={t("kiosk.diskFree")} value={c.diskFreeMb == null ? "—" : formatDiskSize(c.diskFreeMb)} />
               {c.rates ? (
                 <>
-                  <Stat label={t("kiosk.decode")} value={c.rates.decode} unit={t("kiosk.tokPerSec")} live={c.rates.decodeLive} />
+                  <Stat label={c.rates.decodeLabel} value={c.rates.decode} unit={t("kiosk.tokPerSec")} live={c.rates.decodeLive} />
                   <Stat label={t("kiosk.prefill")} value={c.rates.prefill} unit={c.rates.prefill === t("kiosk.prefilling") ? undefined : t("kiosk.tokPerSec")} />
                 </>
               ) : null}

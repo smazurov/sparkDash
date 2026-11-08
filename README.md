@@ -746,14 +746,24 @@ is needed; all monitoring is read-only HTTP. An optional API key uses the existi
 
 The adapter follows Halogen's [v0.20.0 observability contract](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/docs/codex.md#observability):
 
-- **Decode is aggregate throughput**, as on the other backends. Halogen's polling endpoints do
-  not expose that measurement: output tokens divided by summed request durations is a per-request
-  mean because concurrent durations overlap, not aggregate TPS. The adapter leaves
-  `generationMeasurementValid: false`, shows **—**, and publishes no decode-rate history/export
-  sample. It does not substitute that mean into `perStreamTps`, multiply by occupancy, or divide
-  completion bursts by the scrape interval. Output totals and observed completions still feed
-  the token ledger and last-served time. The benchmark independently measures its own streams;
-  its aggregate result is not used as global engine telemetry.
+- **Decode · total · 60s** is aggregate completion-attributed throughput:
+  `Δllamacpp:tokens_predicted_total / 60 wall-clock seconds`. Every concurrent request
+  contributes its output once; summed request durations are **not** the denominator.
+  Deltas belong to the scrape that first observes a completion, with no interpolation
+  of token emission times. A full 60-second observation window is required after startup,
+  failure, counter reset, model/version/endpoint change, clock reversal, or a polling gap
+  of 10 seconds or more. Warmup is **—** and a history/export gap; a fully observed window
+  without completions is a valid **0**, even if requests are still generating tokens.
+  The API identifies this as `generationTpsSource: "completed-window"` and
+  `generationWindowSeconds: 60`.
+- **Completion delay matters:** the counter advances only when a request finishes.
+  Four overlapping 80-second requests producing 2,000 tokens each give **133.33 tok/s**
+  in the 60-second window that observes all four completions—not their **100 tok/s**
+  active-decode rate, nor their **25 tok/s** per-request mean. The reading drops as those
+  completions leave the window. It never claims instantaneous decode speed, never
+  multiplies by occupancy, and does not fill `perStreamTps`. Explicitly live fleet/sidebar
+  numbers exclude it. Output-counter activity, not a retained rate, sets last-served time.
+  Benchmark results measure their own streams/interval and never feed global telemetry.
 - **Prefill · last 60s** follows TensorFold's completed-window convention: sum computed tokens and
   engine prefill seconds over completions observed in the last minute, then divide those sums.
   Cache hits are excluded, sub-50ms windows are not published, and expiry becomes **—** and a
@@ -761,7 +771,12 @@ The adapter follows Halogen's [v0.20.0 observability contract](https://github.co
   Retention does not imply live activity. Scrape-reset `*_tokens_seconds` gauges are not used.
 - **Legacy decode history:** previous adapters incorrectly stored per-request means as aggregate
   decode. History and daily API views exclude those readings on ports currently identified as
-  Halogen, without deleting stored files or changing other ports, prefill, KV or token totals.
+  Halogen. Corrected samples use a separate internal history series (`genTpsWall`) and
+  daily rollup (`decodeWall`), mapped to the public decode fields only at read time. Even
+  mixed cutover buckets/days cannot average the two definitions together. Old recordings
+  expire under normal retention; no migration deletes them. Other ports, prefill, KV and
+  token totals are unchanged. Daily peaks/averages summarize positive window-rate samples,
+  not instantaneous speed or benchmark results.
 - **Token totals**: `llamacpp:tokens_predicted_total` is generated output;
   `llamacpp:prompt_tokens_total` is computed input. Adding `halogen:prompt_tokens_cached_total`
   gives the full prompt total for the ledger. Cache hit ratio is cached / full prompt.

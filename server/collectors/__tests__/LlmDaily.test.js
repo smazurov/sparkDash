@@ -76,11 +76,25 @@ test("LlmDailyStore: unsupported decode hides legacy means without deleting stor
   const store = tmpStore();
   const now = new Date("2026-08-16T12:00:00.000Z");
   store.record("spark-a", 8731, { generationTps: 25.24, prefillTps: 1000 }, now);
-  const view = store.getSeries("spark-a", 8731, { days: 1, now, decodeAvailable: false });
+  const view = store.getSeries("spark-a", 8731, { days: 1, now, completedWindow: true });
   assert.equal(view.days[0].decodeMax, null);
   assert.equal(view.days[0].decodeAvg, null);
   assert.equal(view.days[0].prefillMax, 1000);
-  assert.equal(store.getSeries("spark-a", 8731, { days: 1, now }).days[0].decodeMax, 25.24);
+  for (const rate of [133.33, 100]) store.record("spark-a", 8731, {
+    backend: "halogen", generationTpsSource: "completed-window", generationMeasurementValid: true, generationTps: rate,
+  }, now);
+  // Neither a stale old source nor a numeric sentinel may enter corrected rollups.
+  for (const flags of [{ generationTpsSource: "completed" }, { generationTpsSource: "completed-window", generationMeasurementValid: false }]) {
+    store.record("spark-a", 8731, { backend: "halogen", generationTps: 999, ...flags }, now);
+  }
+  store.flush();
+  const fresh = new LlmDailyStore(store.filePath);
+  const corrected = fresh.getSeries("spark-a", 8731, { days: 2, now, completedWindow: true });
+  assert.equal(corrected.days[0].decodeMax, null);
+  assert.equal(corrected.days[1].decodeMax, 133.33);
+  assert.equal(corrected.days[1].decodeAvg, 116.67);
+  assert.equal(corrected.days[1].prefillMax, 1000);
+  assert.equal(fresh.getSeries("spark-a", 8731, { days: 1, now }).days[0].decodeMax, 25.24);
 });
 
 test("LlmDailyStore: skips unavailable probes", () => {

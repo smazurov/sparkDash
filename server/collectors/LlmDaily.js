@@ -28,6 +28,9 @@ function emptyDay() {
     decodeMax: 0,
     decodeSum: 0,
     decodeN: 0,
+    decodeWallMax: 0,
+    decodeWallSum: 0,
+    decodeWallN: 0,
     prefillMax: 0,
     prefillSum: 0,
     prefillN: 0,
@@ -139,7 +142,7 @@ export class LlmDailyStore {
   /**
    * @param {string} sparkId
    * @param {number} port
-   * @param {{ available?: boolean, measurementValid?: boolean, generationMeasurementValid?: boolean, prefillMeasurementValid?: boolean, generationTps?: number, prefillTps?: number, cachedPrefillTps?: number|null, uncachedPrefillTps?: number|null }} metrics
+   * @param {{ backend?: string, generationTpsSource?: string|null, available?: boolean, measurementValid?: boolean, generationMeasurementValid?: boolean, prefillMeasurementValid?: boolean, generationTps?: number, prefillTps?: number, cachedPrefillTps?: number|null, uncachedPrefillTps?: number|null }} metrics
    * @param {Date} [now]
    */
   record(sparkId, port, metrics, now = new Date()) {
@@ -153,7 +156,10 @@ export class LlmDailyStore {
     const day = this._data[key][date];
 
     let changed = false;
-    if (metrics.generationMeasurementValid !== false) changed = ingest(day, "decode", metrics.generationTps) || changed;
+    if (metrics.generationMeasurementValid !== false) {
+      if (metrics.backend !== "halogen") changed = ingest(day, "decode", metrics.generationTps) || changed;
+      else if (metrics.generationTpsSource === "completed-window") changed = ingest(day, "decodeWall", metrics.generationTps) || changed;
+    }
     if (metrics.prefillMeasurementValid !== false) changed = ingest(day, "prefill", metrics.prefillTps) || changed;
     if (metrics.prefillMeasurementValid !== false && (metrics.cachedPrefillTps != null || metrics.uncachedPrefillTps != null)) {
       if (!day.hasSplit) {
@@ -174,7 +180,7 @@ export class LlmDailyStore {
    * Calendar-aligned last `days` UTC dates (zeros for missing).
    * @param {string} sparkId
    * @param {number} port
-   * @param {{ days?: number, now?: Date, decodeAvailable?: boolean }} [opts]
+   * @param {{ days?: number, now?: Date, completedWindow?: boolean }} [opts]
    */
   getSeries(sparkId, port, opts = {}) {
     const n = Math.min(MAX_DAYS, Math.max(1, Number(opts.days) || 14));
@@ -186,9 +192,13 @@ export class LlmDailyStore {
       const d = new Date(now.getTime() - i * 86400000);
       const date = utcDateKey(d);
       const day = publicDay(date, stored[date]);
-      // Do not expose legacy per-request averages as aggregate history. This is
-      // a read-only view: persisted recordings and prefill rollups are untouched.
-      if (opts.decodeAvailable === false) day.decodeMax = day.decodeAvg = null;
+      // Separate rollups prevent legacy per-request means contaminating the
+      // new wall-window aggregate. Do not erase the older recordings.
+      if (opts.completedWindow) {
+        const saved = stored[date];
+        day.decodeMax = saved?.decodeWallN > 0 ? round2(saved.decodeWallMax) : null;
+        day.decodeAvg = avg(saved?.decodeWallSum, saved?.decodeWallN);
+      }
       out.push(day);
     }
     return { sparkId, port, days: out };

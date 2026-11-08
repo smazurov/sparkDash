@@ -8,11 +8,11 @@ import { finite, llmKey } from "./historyTiers.js";
  */
 
 /**
- * Halogen has never supplied aggregate decode telemetry. Earlier adapters wrongly
- * recorded per-request means as genTps. Exclude those from history responses while
- * that backend is selected; keep the files and every other metric/endpoint intact.
+ * Halogen formerly recorded per-request means as genTps. Its wall-window rate
+ * is stored separately, so old and new definitions never share a bucket/rollup.
+ * Select the corrected series for Halogen ports without deleting legacy data.
  */
-export function unsupportedGenerationPorts(snapshot) {
+export function halogenPorts(snapshot) {
   const ports = Array.isArray(snapshot?.llmPorts) ? snapshot.llmPorts : [];
   const entries = Array.isArray(snapshot?.metrics?.llm) ? snapshot.metrics.llm : [];
   return new Set(entries.flatMap((entry, i) => {
@@ -161,7 +161,10 @@ export function extractSample(snapshot, isFresh = () => true) {
       if (!Number.isInteger(port) || !ports.includes(port) || entry?.available !== true) return;
       // The endpoint answered but its stats could not be read: a gap, not a zero rate.
       if (entry.measurementValid === false) return;
-      if (entry.generationMeasurementValid !== false) set(llmKey(port, "genTps"), entry.generationTps);
+      if (entry.generationMeasurementValid !== false) {
+        if (entry.backend !== "halogen") set(llmKey(port, "genTps"), entry.generationTps);
+        else if (entry.generationTpsSource === "completed-window") set(llmKey(port, "genTpsWall"), entry.generationTps);
+      }
       if (entry.prefillMeasurementValid !== false) set(llmKey(port, "prefillTps"), entry.prefillTps);
       if (finite(entry.kvCacheUsage)) {
         set(llmKey(port, "kvUsage"), Math.min(1, Math.max(0, entry.kvCacheUsage)));

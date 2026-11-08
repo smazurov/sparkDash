@@ -58,7 +58,9 @@ export const UNIT_SERIES = Object.freeze([
 ]);
 
 /** Per LLM endpoint. kvUsage is the 0–1 share of the engine's KV pool. */
-export const LLM_SERIES = Object.freeze(["genTps", "prefillTps", "kvUsage"]);
+// genTpsWall is a versioned replacement for Halogen decode, not a fourth UI
+// series. Its legacy genTps (per-request means) stops growing and expires normally.
+export const LLM_SERIES = Object.freeze(["genTps", "prefillTps", "kvUsage", "genTpsWall"]);
 
 /** Series whose buckets also keep the minimum. */
 const MIN_SERIES = new Set(["memFreeMB"]);

@@ -15,7 +15,15 @@ function halogen(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Halogen overview", () => {
-  it("keeps aggregate decode unavailable and labels computed-only prefill", () => {
+  it.each([133.33, 0])("shows measured wall-window throughput %s, including idle zero", (rate) => {
+    const { container } = render(<SparkCard spark={halogen({ generationTps: rate,
+      generationMeasurementValid: true, generationTpsSource: "completed-window" })} temperatureUnit="celsius" />);
+    expect(container.textContent).toContain("Decode · total · 60s");
+    expect(container.textContent).toContain("Completion-delayed");
+    expect([...container.querySelectorAll(".ov-tps__num")][0].textContent).toBe(rate.toFixed(1) + "tok/s");
+    expect(container.textContent).not.toContain("Collecting 60s window");
+  });
+  it("waits for a full window and labels computed-only prefill", () => {
     const { container } = render(<SparkCard spark={halogen()} temperatureUnit="celsius" />);
     expect(container.querySelector('[title*="Halogen"]')).not.toBeNull();
     expect(container.textContent).toContain("Decode · total");
@@ -28,7 +36,7 @@ describe("Halogen overview", () => {
     expect(metrics[0].getAttribute("title")).toContain("not live throughput");
     expect(metrics[1].getAttribute("title")).toContain("NPU activity is not included");
   });
-  it("keeps unsupported decode unavailable while requests are running", () => {
+  it("keeps warmup unmeasured even while requests are running", () => {
     const { container } = render(<SparkCard spark={halogen({ generationTps: 0,
       prefillTps: 0, prefillTpsSource: null, requestsRunning: 1 })} temperatureUnit="celsius" />);
     expect([...container.querySelectorAll(".ov-tps__num")].map((e) => e.textContent)).toEqual(["—", "—"]);

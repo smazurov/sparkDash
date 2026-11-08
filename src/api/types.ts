@@ -509,7 +509,9 @@ export interface LlmMetrics {
   /** Last observed output-counter advance, epoch ms (Halogen); activity only, not an aggregate rate. */
   generationMeasuredAt?: number | null;
   /** How generationTps was measured when a backend exposes a fallback. */
-  generationTpsSource?: "window" | "slot-mean" | "completed" | null;
+  generationTpsSource?: "window" | "slot-mean" | "completed" | "completed-window" | null;
+  /** Wall-clock window for completion-attributed aggregate output, seconds (Halogen: 60). */
+  generationWindowSeconds?: number | null;
   /**
    * Average decode tok/s of ONE stream (aggregate ÷ active streams when all
    * decode in lockstep). Only engines publishing a per-token latency histogram

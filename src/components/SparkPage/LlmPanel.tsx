@@ -796,9 +796,9 @@ export function LlmPanel({
                   : undefined
               }
             >
-              <span className="eyebrow">{isTensorFold || isHalogen ? t("llm.decodeAggregate") : t("llm.decode")}</span>
+              <span className="eyebrow">{isHalogen ? t("llm.decodeCounterWindow") : isTensorFold ? t("llm.decodeAggregate") : t("llm.decode")}</span>
               <div className="big-num sp-big-lg">
-                {!measured || llm?.generationMeasurementValid === false || (isHalogen && generationTps <= 0) ? (
+                {!measured || llm?.generationMeasurementValid === false ? (
                   <span title={llm?.measurementError ?? undefined}>—</span>
                 ) : isStrata && llm?.decodeActive && generationTps <= 0 ? (
                   <>
@@ -812,6 +812,7 @@ export function LlmPanel({
                   </>
                 )}
               </div>
+              {isHalogen && <span className="sp-avg">{measured && llm?.generationMeasurementValid !== false ? t("llm.completionDelayed") : t("llm.collectingWindow")}</span>}
               <TrendLine data={genHistory} height={44} color="var(--color-accent)" />
               {genAvg != null && <span className="sp-avg mono">{t("llm.average", { value: fmtAvg(genAvg) })}</span>}
               {isStrata && llm?.generationTpsSource === "slot-mean" && <span className="sp-avg">{t("llm.activeSlotMean")}</span>}

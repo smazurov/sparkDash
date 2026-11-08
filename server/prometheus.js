@@ -125,7 +125,7 @@ export const METRIC_FAMILIES = [
   {
     name: "sparkdash_llm_generation_tokens_per_second",
     type: "gauge",
-    help: "Decode throughput over the last poll interval, from the engine's token counters.",
+    help: "Aggregate output throughput in tokens/s. Halogen uses completions observed in the last 60 wall-clock seconds, not instantaneous decode speed.",
   },
   {
     name: "sparkdash_llm_per_stream_tokens_per_second",
@@ -578,6 +578,10 @@ export function unitMetricJson(entry) {
       return;
     }
     if (ll.generationMeasurementValid !== false && finite(ll.generationTps)) e.generation_tokens_per_second = ll.generationTps;
+    if (finite(ll.generationWindowSeconds)) {
+      e.generation_window_seconds = ll.generationWindowSeconds;
+      e.generation_rate_source = ll.generationTpsSource ?? null;
+    }
     if (ll.prefillMeasurementValid !== false && finite(ll.prefillTps)) e.prefill_tokens_per_second = ll.prefillTps;
     if (finite(ll.kvCacheUsage)) e.kv_cache_usage_ratio = ll.kvCacheUsage;
     if (finite(ll.requestsRunning)) e.requests_running = ll.requestsRunning;

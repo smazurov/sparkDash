@@ -35,7 +35,7 @@ describe("fleetStats", () => {
   });
 
   it("excludes completed windows from live fleet totals and preserves unavailable vs measured zero", () => {
-    const completed = { available: true, generationTps: 62.7, generationTpsSource: "completed" };
+    const completed = { available: true, generationTps: 133.33, generationTpsSource: "completed-window" };
     const unknown = { available: true, generationTps: 0, generationMeasurementValid: false };
     expect(computeFleetTotals([spark({ metrics: { llm: [completed, unknown] } })]).decodeTps).toBeNull();
     expect(computeFleetTotals([spark({ metrics: { llm: [completed, { available: true, generationTps: 0 }] } })]).decodeTps).toBe(0);

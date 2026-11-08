@@ -164,7 +164,7 @@ def _value(metrics: dict, key: str):
         "ram_percent": ram.get("percentage"),
         "oom_risk": unified.get("oomRisk"),
         "llm_model": None if llm_unavailable else llm.get("modelId"),
-        "llm_generation_tps": None if llm_unmeasured else llm.get("generationTps"),
+        "llm_generation_tps": None if llm_unmeasured or llm.get("generationMeasurementValid") is False else llm.get("generationTps"),
         "llm_slots_active": None if llm_unavailable else llm.get("slotsActive"),
         "uptime": metrics.get("uptime"),
     }.get(key)
