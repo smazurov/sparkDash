@@ -365,20 +365,33 @@ export function amdMemoryPool(card) {
  * the AMD index range and the throttle view). A number that could not be read is reported
  * unavailable instead of zero, so the panel shows "—" rather than a confident 0.
  */
-export function amdDevicesFromCards(cards) {
+export function amdDevicesFromCards(cards, meminfo = "") {
+  const totalKB = /^MemTotal:\s+(\d+)\s+kB/m.exec(meminfo)?.[1];
+  const availableKB = /^MemAvailable:\s+(\d+)\s+kB/m.exec(meminfo)?.[1];
   return cards.map((card, i) => {
     const pool = amdMemoryPool(card);
     const temperature = card.tempMilli != null ? Math.round(card.tempMilli / 100) / 10 : null;
     const powerDraw = card.powerUw != null ? Math.round(card.powerUw / 1e4) / 100 : null;
     const powerLimit = card.powerCapUw != null ? Math.round(card.powerCapUw / 1e4) / 100 : null;
     const used = pool ? Math.round(pool.used / MB) : null;
-    const total = pool ? Math.round(pool.total / MB) : null;
+    const shared = pool?.source === "gtt";
+    // GTT is a driver allocation budget, not physical RAM. The BIOS carve-out sits
+    // outside MemTotal; count it once, beside the OS-visible shared pool.
+    const total = shared && totalKB != null
+      ? Math.round((Number(totalKB) * 1024 + (card.vramTotal ?? 0)) / MB)
+      : pool ? Math.round(pool.total / MB) : null;
+    const available = shared
+      ? availableKB != null ? Math.round(Number(availableKB) / 1024) : null
+      : used != null && total != null ? Math.max(0, total - used) : null;
+    const systemUsed = shared && totalKB != null && available != null && used != null
+      ? Math.max(0, total - used - available) : null;
     return {
       index: i,
       physicalIndex: i,
       name: AMD_DEVICE_NAMES[card.deviceId] ?? (card.deviceId ? `AMD GPU [${card.deviceId.replace(/^0x/i, "")}]` : "AMD GPU"),
       uuid: null,
       vendor: "amd",
+      memoryModel: shared ? "unified" : "discrete",
       pci: card.pci,
       temperature: temperature ?? 0,
       usage: card.busy ?? 0,
@@ -389,7 +402,8 @@ export function amdDevicesFromCards(cards) {
         used: used ?? 0,
         total: total ?? 0,
         percentage: total > 0 && used != null ? Math.min(100, Math.round((used / total) * 100)) : 0,
-        available: used != null && total != null ? Math.max(0, total - used) : 0,
+        available,
+        ...(shared ? { systemUsed } : {}),
       },
       vramSource: pool?.source ?? null,
       fanRpm: card.fanRpm,

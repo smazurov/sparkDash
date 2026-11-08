@@ -28,15 +28,17 @@ function isDefaultCpu(cpu) {
  * + CPU side, free is MemAvailable — falling back to the GPU's view when the
  * pool is unknown; a discrete card (`kind` host) judges its VRAM, free = total
  * − used (the host collector puts system RAM in `vram.available` while no GPU
- * process runs).
+ * process runs). A Linux AMD APU declares its shared model explicitly and
+ * carries OS headroom and the CPU share in the GPU poll's vram sample.
  */
 export function memoryReading(snapshot, isFresh = () => true) {
   const m = snapshot?.metrics || {};
   // A macOS host shares one pool too (see memoryModelFor in src/shared/vramBreakdown.ts): judging
   // it as discrete would compute its free memory as total minus the GPU's share alone, hiding
   // everything the CPU side holds and charting a Mac near OOM as comfortable.
-  const unified = snapshot?.kind !== "host" || snapshot?.platform === "darwin";
-  const um = m.unifiedMemory;
+  const amdShared = m.gpu?.memoryModel === "unified";
+  const unified = amdShared || snapshot?.kind !== "host" || snapshot?.platform === "darwin";
+  const um = amdShared ? null : m.unifiedMemory;
   if (unified && isFresh("memory") && finite(um?.total) && um.total > 0) {
     const gpuMB = Math.max(0, finite(um.gpuUsed) ? um.gpuUsed : 0);
     const sysMB = Math.max(0, finite(um.cpuUsed) ? um.cpuUsed : 0);
@@ -51,10 +53,13 @@ export function memoryReading(snapshot, isFresh = () => true) {
     return null;
   }
   const used = Math.max(0, finite(vram.used) ? vram.used : 0);
-  const free =
-    unified && finite(vram.available)
-      ? Math.max(0, vram.available)
-      : Math.max(0, vram.total - used);
+  const free = unified
+    ? finite(vram.available) ? Math.max(0, vram.available) : null
+    : Math.max(0, vram.total - used);
+  if (amdShared && finite(vram.systemUsed)) {
+    const sysMB = Math.max(0, vram.systemUsed);
+    return { usedMB: used + sysMB, freeMB: free, gpuMB: used, sysMB };
+  }
   return { usedMB: used, freeMB: free };
 }
 

@@ -143,7 +143,7 @@ function SparkCardImpl({
   const memPct = gpu?.vram?.percentage ?? um?.percentage ?? 0;
   const memUsed = gpu?.vram?.used ?? um?.used ?? 0;
   const memTotal = gpu?.vram?.total ?? um?.total ?? 0;
-  const memAvail = gpu?.vram?.available ?? um?.available ?? 0;
+  const memAvail = gpu?.memoryModel === "unified" ? gpu.vram.available : gpu?.vram?.available ?? um?.available ?? 0;
   const vramAvailable = gpu?.metricAvailability?.vramUsed !== false && gpu?.metricAvailability?.vramTotal !== false;
   const breakdown = gpu && vramAvailable && vramContext ? computeVramBreakdown(gpu.vram, gpu.processes, vramContext) : null;
   const throttle = gpu?.throttle;
@@ -377,7 +377,7 @@ function SparkCardImpl({
                   caption={vramAvailable && memTotal > 0 ? `${fmtStorage(memUsed, false)} / ${fmtStorage(memTotal, true)}` : "—"}
                   pct={vramAvailable ? memPct : 0}
                   color={memColor}
-                  sub={memTotal > 0 && memAvail > 0 ? { label: t("card.available"), value: formatMb(memAvail) } : null}
+                  sub={memTotal > 0 && memAvail != null ? { label: t("card.available"), value: formatMb(memAvail) } : null}
                 />
               )}
               {cards ? null : (
@@ -439,7 +439,7 @@ function SparkCardImpl({
               ) : null}
             </div>
           </div>
-          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform)].low} /> : null}
+          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform, gpu?.memoryModel)].low} /> : null}
           {role === "worker" ? (
             <div className="ov-launch ov-launch--worker">
               <div className="eyebrow">{t("card.workerOfLabel")}</div>

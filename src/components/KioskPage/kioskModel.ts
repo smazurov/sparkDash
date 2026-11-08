@@ -175,7 +175,7 @@ export function kioskCard(
   // Memory: the Overview's breakdown when it has one, otherwise its plain used/total bar.
   let memory: KioskCardMemory | null = null;
   const vramKnown = gpu != null && availabilityOk(av?.vramUsed) && availabilityOk(av?.vramTotal);
-  const discrete = Boolean(gpu?.vram?.total && m?.ram?.total && Math.abs(gpu.vram.total - m.ram.total) > 0.02 * m.ram.total);
+  const discrete = gpu?.memoryModel ? gpu.memoryModel === "discrete" : Boolean(gpu?.vram?.total && m?.ram?.total && Math.abs(gpu.vram.total - m.ram.total) > 0.02 * m.ram.total);
   const ram = discrete && m?.ram ? `${(m.ram.used / 1024).toFixed(1)} / ${(m.ram.total / 1024).toFixed(1)} GB` : null;
   // A GPU whose memory total is the system RAM total shares one pool with the CPU (a Spark, a Mac).
   // The breakdown's model comes from the unit kind, which calls every host discrete; a Mac host is
@@ -206,7 +206,7 @@ export function kioskCard(
     const avail = gpu?.vram?.available ?? um?.available ?? 0;
     memory = {
       label: tr(discrete ? "kiosk.vram" : "kiosk.unifiedMemory"),
-      free: vramKnown && total > 0 ? tr("kiosk.free", { value: formatMb(avail) }) : null,
+      free: vramKnown && total > 0 && gpu?.vram.available != null ? tr("kiosk.free", { value: formatMb(avail) }) : null,
       tone: "ok",
       segments: vramKnown && total > 0 ? [{ key: "gpu", pct: Math.min(100, (used / total) * 100) }] : [],
       legend: [],

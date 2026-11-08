@@ -15,7 +15,7 @@ import { makeHeadResolver, usableHead, type HeadResolver } from "./sparkHead";
  * whether the next allocation fails or the OOM killer runs.
  */
 
-/** GB10 and Apple silicon share one pool between CPU and GPU; a discrete card has its own VRAM. */
+/** GB10, Apple silicon and AMD APUs share CPU/GPU RAM; a discrete card has its own VRAM. */
 export type MemoryModel = "unified" | "discrete";
 
 export type HeadroomTone = "ok" | "low" | "critical";
@@ -35,8 +35,9 @@ export const HEADROOM_THRESHOLDS_MB: Readonly<
 /** The engine's own KV pool is nearly full at this fill: requests queue or get preempted. */
 export const KV_NEARLY_FULL = 0.9;
 
-/** A Spark's memory is unified; so is a Mac host's (Apple silicon). Other hosts have a discrete card. */
-export function memoryModelFor(kind: string | null | undefined, platform?: string | null): MemoryModel {
+/** Prefer the collector's memory model; Sparks and Apple silicon are otherwise unified. */
+export function memoryModelFor(kind: string | null | undefined, platform?: string | null, measured?: MemoryModel): MemoryModel {
+  if (measured) return measured;
   return kind === "host" && platform !== "darwin" ? "discrete" : "unified";
 }
 
@@ -75,6 +76,7 @@ export interface ServingUnitLike {
   workerHeadId?: string | null;
   metrics?: {
     llm?: ReadonlyArray<Partial<LlmMetrics> & { available: boolean }> | null;
+    gpu?: { memoryModel?: MemoryModel } | null;
   } | null;
 }
 
@@ -151,13 +153,14 @@ export interface UnifiedMemoryLike {
 export interface VramLike {
   used: number;
   total: number;
-  available: number;
+  available: number | null;
+  systemUsed?: number | null;
 }
 
 /** What a breakdown needs beyond the GPU numbers: computed once per unit. */
 export interface VramBreakdownContext {
   model: MemoryModel;
-  /** `metrics.unifiedMemory` on a GB10; ignored for a discrete card. */
+  /** `metrics.unifiedMemory` on a GB10/Mac; AMD's same-sample split is in `vram`. */
   unified: UnifiedMemoryLike | null;
   serving: boolean;
   /** See `servingEndpoint`. Not used for per-card rows. */
@@ -170,10 +173,13 @@ export function vramContextFor(
   /** Pass `makeHeadResolver(fleet)` when building contexts for a whole fleet (avoids rescans). */
   resolveHead?: HeadResolver<ServingUnitLike>,
 ): VramBreakdownContext {
-  const model = memoryModelFor(unit.kind, unit.platform);
+  const measured = unit.metrics?.gpu?.memoryModel;
+  const model = memoryModelFor(unit.kind, unit.platform, measured);
   return {
     model,
-    unified: model === "unified" ? unit.metrics?.unifiedMemory ?? null : null,
+    // Linux's separate unified-memory collector is NVIDIA-specific; an AMD APU's
+    // GPU poll already carries its OS headroom and CPU share from the same sample.
+    unified: model === "unified" && measured !== "unified" ? unit.metrics?.unifiedMemory ?? null : null,
     serving: isLlmServing(unit, fleet, resolveHead),
     endpoint: servingEndpoint(unit, fleet, resolveHead),
   };
@@ -264,11 +270,11 @@ export function computeVramBreakdown(
     totalMB = finite(vram?.total) ?? 0;
     if (totalMB <= 0) return null;
     gpuUsedMB = Math.max(0, finite(vram?.used) ?? 0);
-    systemMB = null;
-    freeMB =
-      ctx.model === "unified"
-        ? Math.max(0, finite(vram?.available) ?? totalMB - gpuUsedMB)
-        : Math.max(0, totalMB - gpuUsedMB);
+    systemMB = ctx.model === "unified" ? finite(vram?.systemUsed) : null;
+    if (ctx.model === "unified" && finite(vram?.available) == null) return null;
+    freeMB = ctx.model === "unified"
+      ? Math.max(0, vram!.available!)
+      : Math.max(0, totalMB - gpuUsedMB);
   }
 
   const largest = ctx.serving && gpuUsedMB > 0 ? largestProcess(processes) : null;

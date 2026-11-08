@@ -10,7 +10,7 @@ import type {
 } from "../../api/types";
 import { formatBytesPerSec, formatMb } from "../../shared/formatBytes";
 import { configuredTimeZone } from "../../shared/timeZone";
-import { HEADROOM_THRESHOLDS_MB, memoryModelFor } from "../../shared/vramBreakdown";
+import { HEADROOM_THRESHOLDS_MB, memoryModelFor, type MemoryModel } from "../../shared/vramBreakdown";
 import { Panel } from "../ui/Panel";
 import { ChartIcon } from "../ui/icons";
 import { HistoryChart, type HistoryChartSeries, type HistoryThreshold } from "./HistoryChart";
@@ -135,6 +135,7 @@ function buildCharts(
   timeline: readonly number[],
   kind: string | undefined,
   platform: string | undefined,
+  memoryModel: MemoryModel | undefined,
   temperatureUnit: "celsius" | "fahrenheit",
   t: TFunction,
 ): ChartDef[] {
@@ -143,7 +144,7 @@ function buildCharts(
   const toTemp = f ? (c: number) => (c * 9) / 5 + 32 : undefined;
   const temp = (v: number) => `${Math.round(v)}°${f ? "F" : "C"}`;
   const accent = "var(--color-accent)";
-  const model = memoryModelFor(kind, platform);
+  const model = memoryModelFor(kind, platform, memoryModel);
   const headroom = HEADROOM_THRESHOLDS_MB[model];
 
   // The free line and its headroom thresholds are one question with one scale. The used split is
@@ -359,12 +360,14 @@ export function HistoryPanel({
   sparkId,
   kind,
   platform,
+  memoryModel,
   temperatureUnit,
 }: {
   sparkId: string;
   kind?: string;
   /** A macOS host's memory is unified, like a Spark's. */
   platform?: string;
+  memoryModel?: MemoryModel;
   temperatureUnit: "celsius" | "fahrenheit";
 }) {
   const { t } = useTranslation("hardware");
@@ -378,8 +381,8 @@ export function HistoryPanel({
   const enabled = data?.enabled === true ? data : null;
   const timeline = useMemo(() => (enabled ? buildTimeline(enabled) : []), [enabled]);
   const charts = useMemo(
-    () => (enabled ? buildCharts(enabled, timeline, kind, platform, temperatureUnit, t) : []),
-    [enabled, timeline, kind, platform, temperatureUnit, t],
+    () => (enabled ? buildCharts(enabled, timeline, kind, platform, memoryModel, temperatureUnit, t) : []),
+    [enabled, timeline, kind, platform, memoryModel, temperatureUnit, t],
   );
   const formats = useMemo(() => timeFormatters(range), [range]);
 

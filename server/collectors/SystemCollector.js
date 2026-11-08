@@ -786,7 +786,7 @@ export class SystemCollector {
     const nvidiaDevices = this._parseGpuLines(gpuOut ?? "");
     this._applyClockCap(nvidiaDevices, clockCapMHz);
     const intelDevices = this._intelDevices(this._sampleIntel(intelOut, vramRead));
-    const amdDevices = this._amdLocalDevices();
+    const amdDevices = await this._amdLocalDevices();
     const otherDevices = [...amdDevices, ...intelDevices];
     // nvidia-smi failing is normal on a host without NVIDIA; installed-but-failing next to an Intel card is not.
     const nvidiaFailed = gpuOut === null && intelDevices.length > 0 && (await this._nvidiaSmiInstalled());
@@ -816,6 +816,7 @@ export class SystemCollector {
       usage: gpu.usage,
       power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
       vram,
+      memoryModel: devices.length === 1 ? devices[0].memoryModel : undefined,
       processes,
       throttle: gpu.throttle,
       nvErrNoMemory: await this._nvErrNoMemory(),
@@ -853,12 +854,14 @@ export class SystemCollector {
    * shell, no vendor tool, nothing to install. Empty when no card is bound to amdgpu or
    * sysfs cannot be read.
    */
-  _amdLocalDevices() {
+  async _amdLocalDevices() {
     if (process.platform !== "linux") return [];
     const root = this._sysRoots().find((r) => fs.existsSync(path.join(r, "class/drm")));
     if (!root) return [];
     try {
-      return this._amdDevices(collectAmdSysfs({ root }));
+      const cards = collectAmdSysfs({ root });
+      const meminfo = cards.length ? await this._readHostFile("/proc/meminfo").catch(() => "") : "";
+      return this._amdDevices(cards, meminfo);
     } catch {
       return [];
     }
@@ -868,8 +871,8 @@ export class SystemCollector {
    * Card readings as devices: AMD keeps its own index range (like Intel), and the clock
    * ceiling from pp_dpm_sclk feeds the same throttle view the other vendors get.
    */
-  _amdDevices(cards) {
-    return amdDevicesFromCards(cards).map((device) => ({
+  _amdDevices(cards, meminfo = "") {
+    return amdDevicesFromCards(cards, meminfo).map((device) => ({
       ...device,
       index: AMD_GPU_INDEX_OFFSET + device.index,
       throttle: this._buildThrottle({ smClockMHz: device.smClockMHz, smClockMaxMHz: device.smClockMaxMHz }),
@@ -991,15 +994,22 @@ export class SystemCollector {
       used: devices.some((d) => d.metricAvailability?.vramUsed)
         ? devices.reduce((sum, d) => sum + (d.metricAvailability?.vramUsed ? d.vram.used : 0), 0) : 0,
       total: available.reduce((sum, d) => sum + d.vram.total, 0),
-      available: available.reduce((sum, d) => sum + d.vram.available, 0),
+      available: available.some((d) => d.vram.available == null)
+        ? null : available.reduce((sum, d) => sum + d.vram.available, 0),
+      ...(devices.length === 1 && devices[0].memoryModel === "unified"
+        ? { systemUsed: devices[0].vram.systemUsed } : {}),
     };
   }
 
   _combineVram(a, b) {
     const used = (a?.used || 0) + (b?.used || 0);
     const total = (a?.total || 0) + (b?.total || 0);
-    const available = (a?.available || 0) + (b?.available || 0);
-    return { used, total, percentage: total > 0 ? Math.round((used / total) * 100) : 0, available };
+    const available = a?.available == null || b?.available == null
+      ? null : a.available + b.available;
+    return {
+      used, total, percentage: total > 0 ? Math.round((used / total) * 100) : 0, available,
+      ...(a?.total === 0 && Object.hasOwn(b, "systemUsed") ? { systemUsed: b.systemUsed } : {}),
+    };
   }
 
   /**
@@ -2075,7 +2085,7 @@ export class SystemCollector {
       this._applyClockCap(cliDevices, parseClockCap(clockCapOut));
       const perDeviceVram = this._parseVramLines(legacy ? (legacySections[1] || "") : memFields);
       const apps = this._parseComputeApps(legacy ? (legacySections[2] || "") : computeOut);
-      const amdDevices = legacy ? [] : this._amdDevices(parseAmdProbe(amdProbe));
+      const amdDevices = legacy ? [] : this._amdDevices(parseAmdProbe(amdProbe), resolvedMeminfo);
       // Probe output only exists in the section format; legacy fixtures carry no Intel data.
       const intelDevices = this._intelDevices(this._sampleIntel(legacy ? "" : intelOut, vramRead));
       const otherDevices = [...amdDevices, ...intelDevices];
@@ -2142,6 +2152,8 @@ export class SystemCollector {
         else if (cliDevices.length && totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024;
         if (!cliDevices.length && otherDevices.length) availableMB = Math.round(otherVram.available || 0);
       }
+      const memoryModel = gpuDevices.length === 1 ? gpuDevices[0].memoryModel : undefined;
+      if (memoryModel === "unified") availableMB = gpuDevices[0].vram.available;
       const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
 
       if (this.isWindows) {
@@ -2160,13 +2172,17 @@ export class SystemCollector {
       // Top 5 GPU processes by VRAM usage (a PID spanning several GPUs is summed)
       const cachedApps = this._cachedApps();
       const processes = this._topProcesses(cachedApps);
-      const vram = { used: usedMB, total: totalMB, percentage, available: availableMB };
+      const vram = {
+        used: usedMB, total: totalMB, percentage, available: availableMB,
+        ...(memoryModel === "unified" ? { systemUsed: gpuDevices[0].vram.systemUsed } : {}),
+      };
 
       return markNvidiaSideFailed({
         temperature: gpu.temperature,
         usage: gpu.usage,
         power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
         vram,
+        memoryModel,
         processes,
         throttle: gpu.throttle,
         nvErrNoMemory: await this._nvErrNoMemory(),

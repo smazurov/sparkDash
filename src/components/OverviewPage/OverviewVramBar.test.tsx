@@ -56,6 +56,20 @@ function availableStat(card: HTMLElement) {
 }
 
 describe("Overview VRAM bar", () => {
+  it("shows an AMD Linux host as unified, with OS headroom instead of unused GTT", () => {
+    const apu = makeSpark("apu");
+    apu.kind = "host";
+    apu.platform = "linux";
+    apu.metrics.gpu!.memoryModel = "unified";
+    apu.metrics.gpu!.vram = { total: 128512, used: 28007, available: 1024, systemUsed: 99481, percentage: 22 };
+    const { container } = render(<OverviewPage sparks={[apu]} />);
+    const bar = container.querySelector("[data-vram-breakdown]")!;
+    expect(bar.textContent).toContain("Unified memory");
+    expect(bar.querySelector("[data-headroom]")?.textContent).toBe("1.0 GB free");
+    expect(bar.querySelector("[data-headroom]")?.className).toContain("text-danger");
+    expect(bar.querySelector('[data-segment="system"]')).not.toBeNull();
+  });
+
   it("is the breakdown by default: spark-1 shows engine + system and amber headroom", () => {
     const { container } = render(<OverviewPage sparks={[spark1()]} />);
     const card = cards(container)[0];

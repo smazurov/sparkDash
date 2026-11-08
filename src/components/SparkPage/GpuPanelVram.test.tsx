@@ -57,6 +57,17 @@ const ctx = (over: Partial<VramBreakdownContext>): VramBreakdownContext => ({
 });
 
 describe("GpuPanel VRAM", () => {
+  it("uses OS shared headroom for an APU row next to a discrete card", () => {
+    const gpu = twoCardGpu();
+    gpu.gpus![1].memoryModel = "unified";
+    gpu.gpus![1].vram = { total: 128512, used: 28007, available: 1024, systemUsed: 99481, percentage: 22 };
+    const { container } = render(<GpuPanel gpu={gpu} sparkId="mixed" temperatureUnit="celsius" vramContext={ctx({ model: "discrete" })} />);
+    const bars = container.querySelectorAll("[data-vram-breakdown]");
+    expect(bars[1].textContent).toContain("Unified memory");
+    expect(bars[1].querySelector("[data-headroom]")?.textContent).toBe("1.0 GB free");
+    expect(bars[1].querySelector("[data-headroom]")?.className).toContain("text-danger");
+  });
+
   it("draws spark-1's unified pool with the legend and the Available row toned by headroom", () => {
     const { container } = render(
       <GpuPanel

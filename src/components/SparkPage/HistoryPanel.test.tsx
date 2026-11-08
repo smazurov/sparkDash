@@ -72,6 +72,15 @@ function key(el: HTMLElement, k: string) {
   });
 }
 
+it("uses unified headroom thresholds for an AMD Linux APU", async () => {
+  fetchHistory.mockResolvedValue(data());
+  const { container } = render(<HistoryPanel sparkId="apu" kind="host" platform="linux" memoryModel="unified" temperatureUnit="celsius" />);
+  await flush();
+  const free = chart(container, "memFree");
+  expect(free.textContent).toContain("8.0 GB");
+  expect(free.textContent).toContain("4.0 GB");
+});
+
 async function mount(response: MetricsHistoryResponse = data()) {
   fetchHistory.mockResolvedValue(response);
   const result = render(<HistoryPanel sparkId="spark-1" kind="spark" temperatureUnit="celsius" />);

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SystemCollector, splitRemoteGpuSections } from "../SystemCollector.js";
+import { memoryReading } from "../../metrics/historySample.js";
 
 // One amdgpu card in the probe script's own format (a 128 GB Strix Halo iGPU).
 const AMD_CARD = [
@@ -69,10 +70,66 @@ test("AMD indexes stay in a stable vendor namespace when NVIDIA is absent", asyn
   assert.equal(gpu.gpus[0].powerLimit, 300);
   assert.equal(gpu.gpus[0].smClockMHz, 2800);
   assert.equal(gpu.gpus[0].throttle.smClockMaxMHz, 2900);
-  // The APU pool is the carve-out and GTT together, not the 512 MB BAR window.
-  assert.equal(gpu.gpus[0].vram.total, Math.round((536870912 + 122880000000) / 1048576));
+  // Physical shared RAM is the OS-visible pool plus the reserved BIOS carve-out.
+  assert.equal(gpu.gpus[0].vram.total, 128000 + 512);
+  assert.equal(gpu.memoryModel, "unified");
+  assert.equal(gpu.vram.available, 64000);
   assert.equal(gpu.gpus[0].vram.used, Math.round((235540480 + 29132099584) / 1048576));
   assert.equal(gpu.vram.total, gpu.gpus[0].vram.total);
+});
+
+test("APU headroom follows MemAvailable through collection and history, not unused GTT", async () => {
+  const collector = new SystemCollector({ id: "apu", kind: "host", isLocal: false });
+  for (const free of [64000, 1024, 0]) {
+    const meminfo = `MemTotal: 131072000 kB\nMemAvailable: ${free * 1024} kB`;
+    const gpu = await collector._getRemoteGpu(async () => ["__AMD__", AMD_CARD, "__MEMINFO__", meminfo].join("\n"));
+    assert.equal(gpu.memoryModel, "unified");
+    assert.equal(gpu.vram.available, free);
+    assert.equal(gpu.gpus[0].vram.available, free);
+    const reading = memoryReading({
+      kind: "host", platform: "linux",
+      metrics: { gpu, unifiedMemory: { total: 999999, available: 999999, gpuUsed: 0, cpuUsed: 0 } },
+    });
+    assert.deepEqual(reading, {
+      usedMB: gpu.vram.total - free, freeMB: free,
+      gpuMB: gpu.vram.used, sysMB: gpu.vram.systemUsed,
+    });
+  }
+});
+
+test("an unreadable APU MemAvailable stays unknown in collection and history", async () => {
+  const collector = new SystemCollector({ id: "apu", kind: "host", isLocal: false });
+  const gpu = await collector._getRemoteGpu(async () => ["__AMD__", AMD_CARD, "__MEMINFO__", "MemTotal: 131072000 kB"].join("\n"));
+  assert.equal(gpu.vram.available, null);
+  assert.equal(gpu.gpus[0].vram.available, null);
+  assert.equal(memoryReading({ kind: "host", metrics: { gpu } }).freeMB, null);
+});
+
+test("a discrete AMD card keeps VRAM headroom even when system RAM is low", async () => {
+  const collector = new SystemCollector({ id: "amd-dgpu", kind: "host", isLocal: false });
+  const discrete = AMD_CARD.replace("class 0x038000", "class 0x030000");
+  const gpu = await collector._getRemoteGpu(async () => ["__AMD__", discrete, "__MEMINFO__", "MemTotal: 131072000 kB\nMemAvailable: 1024 kB"].join("\n"));
+  assert.equal(gpu.memoryModel, "discrete");
+  assert.equal(gpu.vram.available, gpu.vram.total - gpu.vram.used);
+  assert.equal(memoryReading({ kind: "host", metrics: { gpu } }).freeMB, gpu.vram.available);
+});
+
+test("local APU aggregation preserves OS headroom, including an unknown reading", async () => {
+  const collector = new SystemCollector({ id: "apu-local", kind: "host", isLocal: true });
+  collector._nvidiaSmi = async () => { throw new Error("not installed"); };
+  collector._readLocalClockCap = async () => null;
+  collector._probeIntelLocal = async () => "";
+  collector._getCPUPower = async () => ({ draw: 20 });
+  collector._nvErrNoMemory = async () => 0;
+  collector._kernelErrors = async () => null;
+  const { parseAmdProbe } = await import("../amdGpu.js");
+  for (const available of ["MemAvailable: 1048576 kB", ""]) {
+    collector._amdLocalDevices = () => collector._amdDevices(parseAmdProbe(AMD_CARD), `MemTotal: 131072000 kB\n${available}`);
+    const gpu = await collector._getGPUAll();
+    assert.equal(gpu.memoryModel, "unified");
+    assert.equal(gpu.vram.available, available ? 1024 : null);
+    assert.equal(gpu.vram.systemUsed, gpu.gpus[0].vram.systemUsed);
+  }
 });
 
 test("a host with no detected GPU returns the safe empty shape", async () => {
@@ -121,7 +178,7 @@ test("local collection reads AMD from sysfs next to nvidia-smi", async () => {
   assert.equal(gpu.power.draw, 206);
 });
 
-test("_amdLocalDevices reads a sysfs tree and stamps the AMD index range on it", () => {
+test("_amdLocalDevices reads a sysfs tree and stamps the AMD index range on it", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "amd-sys-"));
   const w = (rel, text) => {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
@@ -144,21 +201,24 @@ test("_amdLocalDevices reads a sysfs tree and stamps the AMD index range on it",
   w("devices/0000:c6:00.0/hwmon/hwmon2/power1_average", "55000000\n");
   const collector = new SystemCollector({ id: "amd-local", kind: "host", isLocal: true });
   collector._sysRoots = () => [root];
-  const [device] = collector._amdLocalDevices();
+  collector._readHostFile = async () => MEMINFO;
+  const [device] = await collector._amdLocalDevices();
   assert.equal(device.index, 1000);
   assert.equal(device.vendor, "amd");
   assert.equal(device.usage, 42);
   assert.equal(device.temperature, 61);
   assert.equal(device.powerDraw, 55);
   assert.equal(device.metricAvailability.usage, true);
-  assert.ok(device.vram.total > 100000, "the APU pool is carve-out + GTT");
+  assert.equal(device.vram.total, 128512);
+  assert.equal(device.vram.available, 64000);
+  assert.equal(device.memoryModel, "unified");
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("_amdLocalDevices is empty when there is no sysfs to read", () => {
+test("_amdLocalDevices is empty when there is no sysfs to read", async () => {
   const collector = new SystemCollector({ id: "amd-none", kind: "host", isLocal: true });
   collector._sysRoots = () => ["/does/not/exist"];
-  assert.deepEqual(collector._amdLocalDevices(), []);
+  assert.deepEqual(await collector._amdLocalDevices(), []);
 });
 
 test("remote sections survive a double underscore inside a GPU name and the AMD probe", async () => {

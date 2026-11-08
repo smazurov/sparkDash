@@ -275,6 +275,8 @@ export interface GpuMetricAvailability {
 }
 
 export interface GpuMetrics {
+  /** Explicit for Linux AMD APUs: the GPU and CPU share physical RAM. */
+  memoryModel?: "unified" | "discrete";
   vendors?: Array<"amd" | "nvidia" | "intel">;
   metricAvailability?: GpuMetricAvailability;
   temperature: number | null;
@@ -297,7 +299,9 @@ export interface GpuMetrics {
     total: number;
     percentage: number;
     /** MemAvailable in MB — the real free memory in the shared pool. */
-    available: number;
+    available: number | null;
+    /** CPU/OS share of an AMD APU's physical pool; null when meminfo is unreadable. */
+    systemUsed?: number | null;
   };
   /** Top GPU processes by VRAM usage (sorted descending, max 5). */
   processes?: Array<{ pid: number; name: string; vramMB: number }>;
@@ -321,6 +325,7 @@ export interface GpuMetrics {
 
 /** One physical GPU; `index` is a stable dashboard identity and `physicalIndex` is the vendor's index (nvidia-smi, amd-smi, or Intel sysfs). */
 export interface GpuDevice {
+  memoryModel?: "unified" | "discrete";
   /** Stable dashboard identity; AMD indices use a separate internal range. */
   index: number;
   /** Physical index reported by the vendor tool. */
@@ -334,7 +339,7 @@ export interface GpuDevice {
   temperature: number;
   usage: number;
   power: { draw: number; limit: number };
-  vram: { used: number; total: number; percentage: number; available: number };
+  vram: GpuMetrics["vram"];
   throttle?: GpuThrottle | null;
   /** Processes holding memory on this card only. */
   processes?: Array<{ pid: number; name: string; vramMB: number }>;

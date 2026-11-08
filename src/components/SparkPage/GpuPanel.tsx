@@ -89,7 +89,7 @@ function GpuDeviceRow({
   // One card's own VRAM and processes; its KV pool is not knowable per card.
   const breakdown = vramContext && d.metricAvailability?.vramUsed !== false && d.metricAvailability?.vramTotal !== false
     ? computeVramBreakdown(d.vram, d.processes, {
-        model: "discrete",
+        model: d.memoryModel ?? "discrete",
         unified: null,
         serving: vramContext.serving,
       })
@@ -420,7 +420,7 @@ export function GpuPanel({
                 color="bg-info"
                 caption={`${formatMb(vramUsed).replace(/ (GB|MB)$/, "")} / ${formatMb(vramTotal)}`}
               />
-              {gpu.vram.available > 0 && (
+              {gpu.vram.available != null && (
                 <div className="sp-row">
                   <span className="text-muted">{tr("gpu.available")}</span>
                   <span className="mono text-text">{formatMb(gpu.vram.available)}</span>
