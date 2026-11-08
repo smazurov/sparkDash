@@ -10,7 +10,6 @@ import { backendLabel } from "../../shared/llmBackends";
 import { formatDiskSize, formatMb } from "../../shared/formatBytes";
 import { shortProcessName } from "../../shared/processName";
 import { shortGpuName } from "../../shared/gpuName";
-import { mainFilesystem, metricsView } from "../../shared/mainFilesystem";
 import { Tag } from "../ui/Tag";
 import { HealthChips, worstSeverity } from "../ui/HealthFindings";
 import { AppLink } from "../ui/AppLink";
@@ -187,8 +186,8 @@ function SparkCardImpl({
   // unevenly across cards (or one card sitting idle).
   const cards = gpu?.gpus && gpu.gpus.length > 1 ? gpu.gpus : null;
 
-  // The same "main disk" as the Storage Manager's card and summary (shared policy: "/" first, never /boot/efi).
-  const rootDisk = mainFilesystem(spark.metrics.storage, metricsView);
+  const rootDisk =
+    spark.metrics.storage.find((d) => d.label === "/") ?? spark.metrics.storage.find((d) => d.device === "nvme0n1p2");
 
   const comfy = spark.comfyMonitoring ? spark.metrics?.comfy : undefined;
   const hermes = spark.hermes;
