@@ -269,6 +269,7 @@ function SparkCardImpl({
   const showTps = role !== "worker" && !!llm;
   const isStrata = llm?.backend === "strata";
   const isTensorFold = llm?.backend === "tensorfold";
+  const isHalogen = llm?.backend === "halogen";
   const completedPrefill = llm?.prefillTpsSource?.startsWith("completed-") === true;
   // Engines that report requests (TensorFold, Strata, …) used to hide their parallelism behind
   // "N running": a unit set to --parallel 4 and one set to 8 read the same. Name the capacity too.
@@ -488,14 +489,16 @@ function SparkCardImpl({
             <div className="ov-tps">
               <div
                 title={
-                  isStrata
+                  isHalogen
+                    ? t("card.halogenRatesHelp")
+                    : isStrata
                     ? t("card.decodeStrataHelp")
                     : undefined
                 }
               >
-                <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isTensorFold ? t("card.decodeAggregate") : t("card.decode")}</div>
-                {llm.measurementValid === false ? (
-                  <div className="big-num ov-tps__num" title={llm.measurementError ?? t("card.statsCouldNotBeRead")}>—</div>
+                <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isHalogen ? t("card.decodeCompleted") : isTensorFold ? t("card.decodeAggregate") : t("card.decode")}</div>
+                {llm.measurementValid === false || (isHalogen && llm.generationTps <= 0) ? (
+                  <div className="big-num ov-tps__num" title={llm.measurementError ?? (isHalogen ? t("card.halogenRatesHelp") : t("card.statsCouldNotBeRead"))}>—</div>
                 ) : isStrata && llm.decodeActive && llm.generationTps <= 0 ? (
                   <div className="big-num ov-tps__num ov-tps__num--live">
                     <span className="ov-tps__dots" aria-hidden />
@@ -518,14 +521,16 @@ function SparkCardImpl({
               </div>
               <div
                 title={
-                  isStrata
+                  isHalogen
+                    ? t("card.halogenRatesHelp")
+                    : isStrata
                     ? t("card.prefillStrataHelp")
                     : undefined
                 }
               >
-                <div className="eyebrow">{completedPrefill ? t("card.prefillCompleted") : t("card.prefill")}</div>
-                {llm.measurementValid === false ? (
-                  <div className="big-num ov-tps__num" title={llm.measurementError ?? t("card.statsCouldNotBeRead")}>—</div>
+                <div className="eyebrow">{completedPrefill || isHalogen ? t("card.prefillCompleted") : t("card.prefill")}</div>
+                {llm.measurementValid === false || (isHalogen && llm.prefillTps <= 0) ? (
+                  <div className="big-num ov-tps__num" title={llm.measurementError ?? (isHalogen ? t("card.halogenRatesHelp") : t("card.statsCouldNotBeRead"))}>—</div>
                 ) : llm.prefillActive && llm.prefillTps <= 0 ? (
                   <div className="big-num ov-tps__num ov-tps__num--live" title={isStrata ? t("card.prefillProcessingStrata") : t("card.prefillProcessing")}>
                     <span className="ov-tps__dots" aria-hidden />
@@ -538,8 +543,8 @@ function SparkCardImpl({
                 )}
                 {isTensorFold && !completedPrefill && llm.prefillTps <= 0 && <small className="text-muted">{t("card.notMeasuredLive")}</small>}
                 {llm.measurementValid !== false && completedPrefill && (
-                  <small className="text-muted" title={t("card.completedPrefillHelp")}>
-                    {t("card.effectiveIncludesCached")}
+                  <small className="text-muted" title={llm.prefillTpsSource === "completed-computed" ? t("card.halogenRatesHelp") : t("card.completedPrefillHelp")}>
+                    {llm.prefillTpsSource === "completed-computed" ? t("card.computedTokensOnly") : t("card.effectiveIncludesCached")}
                   </small>
                 )}
                 {isStrata && llm.prefillTps > 0 && <small className="text-muted">{t("card.lastReportedMean")}</small>}

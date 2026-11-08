@@ -552,7 +552,9 @@ export class SparkMonitor {
       ports.add(port);
       const gen = Number(entry.generationTps);
       const pre = Number(entry.prefillTps);
+      const running = Number(entry.requestsRunning);
       if (entry.available && (entry.decodeActive === true || entry.prefillActive === true ||
+        (Number.isFinite(running) && running > 0) ||
         (Number.isFinite(gen) && gen > 0) || (Number.isFinite(pre) && pre > 0))) {
         this._llmLastActiveAt.set(port, now);
       }

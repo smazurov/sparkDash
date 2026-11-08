@@ -478,14 +478,14 @@ export interface LlmMetrics {
   measurementValid?: boolean;
   /** Why the last poll's stats could not be read; null while they can. */
   measurementError?: string | null;
-  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "strata" | "flare" | "locals" | "splash" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "halogen" | "freetoken" | "radiance" | "strata" | "flare" | "locals" | "splash" | null;
   /** How the monitor reaches the engine: its own address, or an SSH forward when only SSH gets there. */
   via?: "direct" | "ssh-tunnel";
   modelId: string | null;
   modelPath: string | null;
-  /** Engine version from vLLM's GET /version; null when the backend reports none or it could not be read. */
+  /** Engine version from vLLM /version or TensorFold/Halogen /health; null when unavailable. */
   engineVersion?: string | null;
-  /** Exact served request IDs from /v1/models, in response order. */
+  /** Exact served request IDs from /v1/models; Halogen puts its primary GPU model first. */
   models?: string[];
   contextLength: number | null;
   /** GPU memory utilization for the LLM engine (0–1), e.g. 0.9. Only from vLLM internal info. */
@@ -495,7 +495,7 @@ export interface LlmMetrics {
   slotsTotal: number;
   generationTps: number;
   /** How generationTps was measured when a backend exposes a fallback. */
-  generationTpsSource?: "window" | "slot-mean" | null;
+  generationTpsSource?: "window" | "slot-mean" | "completed" | null;
   /**
    * Average decode tok/s of ONE stream (aggregate ÷ active streams when all
    * decode in lockstep). Only engines publishing a per-token latency histogram
@@ -508,8 +508,8 @@ export interface LlmMetrics {
    * Not continuously measured live or an individual-request rate.
    */
   perStreamPrefillTps?: number | null;
-  /** TensorFold: live throughput or a held, cache-inclusive completed-request window. */
-  prefillTpsSource?: "live" | "completed-effective" | "completed-split" | null;
+  /** Live throughput or a completed-request window; Halogen completed-computed excludes cache hits. */
+  prefillTpsSource?: "live" | "completed-effective" | "completed-split" | "completed-computed" | null;
   prefillTps: number;
   /** A prompt is being processed right now. With no live rate available (TensorFold reports totals only for finished requests) the UI says "prefilling" instead of 0. */
   prefillActive?: boolean;

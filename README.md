@@ -134,7 +134,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Windows hosts** | Windows machines with an AMD iGPU (Strix Halo and friends) are first-class units too: agentless PowerShell over OpenSSH, CPU/RAM/disks/network collectors, and GPU usage straight from the engine performance counters (reads like Task Manager). The Add/Edit wizard has a **Strix Halo / Windows host** unit type |
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
-| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, LM Studio, Ollama, ds4-server, EXL3, TensorFold, FreeToken, Strata, q27, NVIDIA Flare, Locals, or Splash; live decode/prefill tok/s from the engine's own counters where it publishes them (not LM Studio or Ollama); cached vs uncached prefill on ds4, llama.cpp, SGLang, and q27; **daily peak** history on the LLM card |
+| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, LM Studio, Ollama, ds4-server, EXL3, TensorFold, Halogen, FreeToken, Strata, q27, NVIDIA Flare, Locals, or Splash; live decode/prefill tok/s from the engine's own counters where it publishes them (not LM Studio or Ollama); cached vs uncached prefill on ds4, llama.cpp, SGLang, and q27; **daily peak** history on the LLM card |
 | **LLM server presets** | One-click **LM Studio :1234** / **Ollama :11434** / **TensorFold :8888** presets in the Add wizard's LLM-ports step, the "+ Add LLM port" panel, and each LLM panel's settings (they fill the port number — they install nothing) |
 | **ComfyUI** | Opt-in probe: queue/jobs, progress, cancel, Open link, inventory, overview chip |
 | **Hermes Agent** | Opt-in per unit: background update check (10 min), status badges, one-click or batch `hermes update` |
@@ -707,6 +707,7 @@ LM Studio (:1234), Ollama (:11434) and TensorFold (:8888) are one-click presets 
 | EXL3 | `/health` with backend + token totals |
 | q27 | Prometheus exposition |
 | TensorFold | `owned_by` on `/v1/models`, totals from `/health`, and `/health`'s `version` when the build names one |
+| Halogen | `/v1/models` reports `owned_by: "halogen"` (wins over its capacity-only `/slots`); `/health` identifies the GPU model, context and engine version; Prometheus `/metrics` supplies counters |
 | FreeToken | `/v1/stats` throughput contract |
 | Strata | `/health` reports `service: "strata"`, checked before the llama.cpp-compatible `/slots`; JSON `/metrics` supplies rates |
 
@@ -715,6 +716,33 @@ Detection is **positive-signature first**: some desktop engines (LM Studio) answ
 Strata monitoring follows the [v0.1.45 JSON metrics contract](https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/serve/server.py#L3738-L3790). **Decode** uses the aggregate sliding-window rate. When a newer request is prefilling and hides that rate, it sums the available decoding-slot rates and labels the result **active-slot mean** (each slot's mean starts at its first generated token). It publishes no partial sum if a decoding slot lacks a rate or work is running outside the slots. **Prefill** is the engine's **last reported mean** for new/computed prompt tokens, shown while the selected request is reading and either a slot is reading or unfinished engine progress confirms prefill outside the slots; the value may come from an earlier prefill and is not a sum across concurrent slots. A busy phase without a rate says **decoding** or **prefilling**. Idle clears both rates immediately. Completed-request totals are retained as totals, never turned into live rates; restarting Strata therefore does not create a TPS spike. No per-slot prefill throughput or KV-cache occupancy is inferred from held prompt tokens.
 
 Strata's model aliases share the loaded engine's native context limit, shown on both the LLM panel and overview card. Its loaded engine is **Active** even when idle. The sidebar retains numeric decode rates, uses **prefilling** or **decoding** while work is active without a decode rate, and returns to zero when idle.
+
+### Halogen
+
+Add the [Halogen Flash Server](https://github.com/peonist-ai/halogen-flash-server) HTTP port
+(default **8731**) to the unit's LLM ports. No launcher, container access or GPU-specific collector
+is needed; all monitoring is read-only HTTP. An optional API key uses the existing per-port setting.
+
+The adapter follows Halogen's [v0.20.0 observability contract](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/docs/codex.md#observability):
+
+- **Decode · completed / Prefill · completed** divide changes in completed token counters by
+  changes in the engine's decode/prefill seconds, **not the polling interval**. They are means over
+  requests completed between successful polls, not live throughput or aggregate concurrency.
+  Prefill counts **computed tokens only**, excluding cache hits. No new completion shows **—**;
+  startup, restart, failed reads and long polling gaps re-seed without a lifetime-counter spike.
+  Sticky `*_tokens_seconds` gauges are not used. On-demand benches still measure streaming speed.
+- **Token totals**: `llamacpp:tokens_predicted_total` is generated output;
+  `llamacpp:prompt_tokens_total` is computed input. Adding `halogen:prompt_tokens_cached_total`
+  gives the full prompt total for the ledger. Cache hit ratio is cached / full prompt.
+- **Slots and queue** use the reported capacity and running/waiting counts. A busy request with no
+  completed-rate sample is not called idle; its phase (prefill versus decode) is not guessed.
+- **KV** uses actual pool occupancy, including held warm conversations, not front-end reservations.
+  It is the last engine report, not a live allocation trace or GPU-memory measurement. Pool size is
+  positions, not bytes. Draft acceptance is accepted / proposed tokens; absent latency histograms,
+  memory sizes and preemption counts stay unknown.
+- **Scope is the primary GPU model**, named by `/health`, even when `/v1/models` also lists NPU
+  models. The NPU queue, tokens and rates are not folded into GPU telemetry. All served model IDs
+  remain available for on-demand requests. The engine version comes from `/health.version.engine`.
 
 ### Decode / prefill tok/s on engines without counters
 
@@ -1366,6 +1394,7 @@ Each configured LLM port gets its own `LlmProbe` instance running in parallel. P
 - **EXL3** (ExLlamaV3 `tools/serve_openai.py`) — `/v1/models` (`owned_by: exl3`) or `/health` `{ok, busy}`; live tok/s from `/health` cumulative counters
 - **Flare** (NVIDIA flare-local-inference) — `/v1/models` card with a `flare` object; live tok/s from `flare_generated_tokens_total` / `flare_prefill_tokens_total` counter diffs, cached vs uncached prefill from `flare_cache_reused_tokens_total`, slots, queue, preemptions and KV pool from `flare_*` gauges
 - **q27** (signalnine/q27 engine) — `/v1/models` (`owned_by: q27`) or Prometheus `q27_*` series; live tok/s from `q27_*_processed` counter diffs (completion-based totals as fallback), exact computed-only prefill with the cached/uncached split doubling as the prefix-cache hit rate, TTFT/E2E/ITL p95 histograms, and constant-0 preemptions (FIFO admission, no wait queue)
+- **Halogen** (peonist-ai/halogen-flash-server) — `owned_by: halogen` overrides the llama.cpp-compatible `/slots`. `/health` and `/metrics` provide primary-GPU telemetry; completed-request rates are labelled separately from live throughput ([details](#halogen)).
 - **TensorFold** (ashhart/TensorFold) — `/v1/models` (`owned_by: tensorfold`). No `/metrics`. Live tok/s comes from `/health` when it publishes `prompt_tokens_total`, `completion_tokens_total`, and `prefill_seconds_total` (decode is the completion-counter diff; prefill is prompt tokens ÷ prefill time). The slots tile reads `streams.max` and `requests_running` on CUDA 0.6.0, and `max_batch_size` on MLX. A stock server that only returns `{ok: true}` stays at 0. Decode/prefill benches and the showcase work regardless.
 - **FreeToken** — `/v1/models` (`owned_by: FreeToken`), or a `/v1/stats` document with `throughput.decode_tps` / `prefill_tps` and lifetime prompt/completion totals. Those rates are FreeToken's own 5-second window (0 when idle). `requests.ttft_mean_ms` is a mean; `requests.p95_ms` is end-to-end latency, not TTFT p95. Queue length, slot capacity, and preemptions stay unset.
 - **vLLM / sglang** — `/v1/models`; sglang via `/server_info` (`last_gen_throughput` when metrics off; `/get_server_info` fallback), vLLM via Prometheus `/metrics` counters (scientific notation supported)

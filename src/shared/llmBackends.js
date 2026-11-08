@@ -15,6 +15,7 @@ export const BACKEND_LABELS = Object.freeze({
   exl3: "EXL3",
   q27: "q27",
   tensorfold: "TensorFold",
+  halogen: "Halogen",
   freetoken: "FreeToken",
   radiance: "Radiance",
   strata: "Strata",

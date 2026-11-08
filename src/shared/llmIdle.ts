@@ -7,6 +7,9 @@ interface LlmRates {
   prefillActive?: boolean;
   /** A request is decoding even when the engine has not reported a rate. */
   decodeActive?: boolean;
+  /** Some engines report load without live phase/rate counters (Halogen). */
+  requestsRunning?: number | null;
+  requestsWaiting?: number | null;
 }
 
 const serving = (tps: number) => Number.isFinite(tps) && tps > 0;
@@ -17,6 +20,7 @@ const serving = (tps: number) => Number.isFinite(tps) && tps > 0;
  */
 export function isLlmIdle(llm: LlmRates): boolean {
   if (llm.prefillActive === true || llm.decodeActive === true) return false;
+  if (serving(llm.requestsRunning ?? 0) || serving(llm.requestsWaiting ?? 0)) return false;
   return !serving(llm.generationTps) && !serving(llm.prefillTps);
 }
 
