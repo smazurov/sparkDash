@@ -90,7 +90,7 @@ export function FleetKpis({
     const t = totalsRef.current;
     setTrends((prev) => {
       const next = {
-        decode: pushRolling(prev.decode, t.decodeTps),
+        decode: t.decodeTps == null ? prev.decode : pushRolling(prev.decode, t.decodeTps),
         power: t.powerW == null ? prev.power : pushRolling(prev.power, t.powerW),
         mem: pushRolling(prev.mem, t.memUsedMb / 1024),
       };
@@ -132,7 +132,7 @@ export function FleetKpis({
       {showDecode ? (
         <Kpi
           label={t("kpis.fleetDecode")}
-          value={totals.decodeTps.toFixed(1)}
+          value={totals.decodeTps == null ? "—" : totals.decodeTps.toFixed(1)}
           unit="tok/s"
           trend={trends.decode}
           color="var(--color-accent)"

@@ -62,6 +62,16 @@ test("LlmDailyStore: invalid measurements never enter daily averages", () => {
   assert.equal(days[0].uncachedPrefillAvg, null);
 });
 
+test("LlmDailyStore: invalid decode leaves prefill recording independent", () => {
+  const store = tmpStore();
+  const now = new Date("2026-08-16T12:00:00.000Z");
+  store.record("spark-a", 8731, { available: true, generationMeasurementValid: false,
+    generationTps: 999, prefillTps: 1000 }, now);
+  const { days } = store.getSeries("spark-a", 8731, { days: 1, now });
+  assert.equal(days[0].decodeAvg, null);
+  assert.equal(days[0].prefillAvg, 1000);
+});
+
 test("LlmDailyStore: skips unavailable probes", () => {
   const store = tmpStore();
   const now = new Date("2026-08-16T12:00:00.000Z");

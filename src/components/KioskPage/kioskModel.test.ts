@@ -62,6 +62,18 @@ describe("kioskCard", () => {
     expect(kioskCard(s, null, null).rates?.prefill).toBe("1,000");
   });
 
+  it("never calls a completed decode rate live or an absent one zero", () => {
+    const s = makeSpark("halogen");
+    Object.assign(s.metrics.llm[0], { backend: "halogen", measurementValid: true,
+      generationMeasurementValid: false, generationTps: 0, generationTpsSource: null });
+    expect(kioskCard(s, null, null).rates?.decode).toBe("—");
+    Object.assign(s.metrics.llm[0], { generationMeasurementValid: true,
+      generationTps: 62.7, generationTpsSource: "completed" });
+    const rates = kioskCard(s, null, null).rates;
+    expect(rates?.decode).toBe("62.7");
+    expect(rates?.decodeLive).toBe(false);
+  });
+
   it("adds system RAM on a host with a discrete card", () => {
     const s = makeSpark("h");
     s.kind = "host";

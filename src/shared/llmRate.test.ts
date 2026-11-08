@@ -7,6 +7,12 @@ describe("measuredGenerationTps", () => {
     expect(measuredGenerationTps({ generationTps: 0, measurementValid: true })).toBe(0);
   });
 
+  it("does not present completed or expired Halogen decode as live throughput", () => {
+    expect(measuredGenerationTps({ generationTps: 62.7, generationTpsSource: "completed" })).toBeNull();
+    expect(measuredGenerationTps({ generationTps: 0, generationMeasurementValid: false })).toBeNull();
+    expect(measuredGenerationTps({ generationTps: NaN })).toBeNull();
+  });
+
   it("is null when the endpoint answered but its stats could not be read, or there is no engine", () => {
     expect(measuredGenerationTps({ generationTps: 0, measurementValid: false })).toBeNull();
     expect(measuredGenerationTps(null)).toBeNull();

@@ -1,10 +1,11 @@
 import type { SparkSnapshot } from "../../api/types";
+import { measuredGenerationTps } from "../../shared/llmRate";
 
 export interface FleetTotals {
   total: number;
   online: number;
-  /** Sum of generation tok/s across every available LLM endpoint. */
-  decodeTps: number;
+  /** Sum of measured live decode rates; excludes completed windows, null when none report live rates. */
+  decodeTps: number | null;
   /** Sum of GPU power draw (W) across online units that report it; null when none does. */
   powerW: number | null;
   /** Unified memory / VRAM in use (MB) across online units. */
@@ -15,7 +16,7 @@ export interface FleetTotals {
 
 /** Aggregate live fleet numbers from one snapshot list (pure). */
 export function computeFleetTotals(sparks: readonly SparkSnapshot[]): FleetTotals {
-  const t: FleetTotals = { total: sparks.length, online: 0, decodeTps: 0, powerW: null, memUsedMb: 0, memTotalMb: 0 };
+  const t: FleetTotals = { total: sparks.length, online: 0, decodeTps: null, powerW: null, memUsedMb: 0, memTotalMb: 0 };
   for (const s of sparks) {
     const total = s.metrics?.gpu?.vram?.total || s.metrics?.unifiedMemory?.total || 0;
     t.memTotalMb += total;
@@ -29,7 +30,10 @@ export function computeFleetTotals(sparks: readonly SparkSnapshot[]): FleetTotal
     }
     t.memUsedMb += s.metrics?.gpu?.vram?.used ?? s.metrics?.unifiedMemory?.used ?? 0;
     if (Array.isArray(s.metrics?.llm)) {
-      for (const llm of s.metrics.llm) if (llm.available && llm.measurementValid !== false) t.decodeTps += llm.generationTps || 0;
+      for (const llm of s.metrics.llm) {
+        const rate = llm.available ? measuredGenerationTps(llm) : null;
+        if (rate != null) t.decodeTps = (t.decodeTps ?? 0) + rate;
+      }
     }
   }
   return t;

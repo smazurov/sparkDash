@@ -725,16 +725,17 @@ is needed; all monitoring is read-only HTTP. An optional API key uses the existi
 
 The adapter follows Halogen's [v0.20.0 observability contract](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/docs/codex.md#observability):
 
-- **Decode · completed** divides changes in completed output tokens by changes in decode seconds,
-  **not the polling interval**. **Prefill · last 60s** follows TensorFold's completed-window
-  convention: sum the **computed tokens only** and engine prefill seconds from completions observed
-  in the last 60 seconds, then divide those sums. It stays visible between completions without
-  pretending to be live throughput, excludes cache hits, and expires to **—**. Windows with less
-  than 50 ms of measured work are not published. Startup, restart, failed reads and polling gaps
-  re-seed and discard the old window; no lifetime-counter spike or measurement from a prior model.
-  `prefillMeasurementValid: false` leaves a gap in history and omits the exported rate rather than
-  recording a fabricated zero. `prefillMeasuredAt` keeps a retained rate from extending last-served
-  time or marking an idle engine busy. Scrape-reset `*_tokens_seconds` gauges are not used.
+- **Decode · last 60s / Prefill · last 60s** each sum tokens and corresponding engine seconds
+  from completions observed in the last minute, then divide those sums—**not the polling interval**.
+  Prefill follows TensorFold's completed-window convention, counting **computed tokens only** and
+  excluding cache hits. Both stay visible between completions without pretending to be live
+  throughput, then expire to **—**. Prefill windows with less than 50 ms of measured work are not
+  published. Startup, restart, failed reads and polling gaps re-seed and discard both windows;
+  no lifetime-counter spike or measurement from a prior model. `generationMeasurementValid` and
+  `prefillMeasurementValid` independently leave history/export gaps when false, not fabricated
+  zeroes. Their `*MeasuredAt` timestamps keep retained rates from extending last-served time or
+  marking an idle engine busy. Live widgets (including benchmark live TPS, sidebar and fleet
+  totals) exclude completed rates. Scrape-reset `*_tokens_seconds` gauges are not used.
 - **Token totals**: `llamacpp:tokens_predicted_total` is generated output;
   `llamacpp:prompt_tokens_total` is computed input. Adding `halogen:prompt_tokens_cached_total`
   gives the full prompt total for the ledger. Cache hit ratio is cached / full prompt.

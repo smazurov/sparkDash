@@ -461,7 +461,7 @@ function SparkCardImpl({
                 {headLlm
                   ? t("card.workerHeadThroughput", {
                       backend: backendLabel(headLlm.backend) ?? headLlm.backend ?? "LLM",
-                      decode: headLlm.measurementValid === false ? "—" : headLlm.generationTps.toFixed(1),
+                      decode: headLlm.measurementValid === false || headLlm.generationMeasurementValid === false ? "—" : headLlm.generationTps.toFixed(1),
                       perStream: headLlm.perStreamTps != null ? t("card.workerHeadCompletedDecode", { value: headLlm.perStreamTps.toFixed(1) }) : "",
                       prefill: headLlm.prefillTpsSource?.startsWith("completed-") ? t("card.workerHeadCompletedPrefill", { value: Math.round(headLlm.prefillTps).toLocaleString() }) : "",
                     })
@@ -497,7 +497,7 @@ function SparkCardImpl({
                 }
               >
                 <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isHalogen ? t("card.decodeCompleted") : isTensorFold ? t("card.decodeAggregate") : t("card.decode")}</div>
-                {llm.measurementValid === false || (isHalogen && llm.generationTps <= 0) ? (
+                {llm.measurementValid === false || llm.generationMeasurementValid === false || (isHalogen && llm.generationTps <= 0) ? (
                   <div className="big-num ov-tps__num" title={llm.measurementError ?? (isHalogen ? t("card.halogenRatesHelp") : t("card.statsCouldNotBeRead"))}>—</div>
                 ) : isStrata && llm.decodeActive && llm.generationTps <= 0 ? (
                   <div className="big-num ov-tps__num ov-tps__num--live">

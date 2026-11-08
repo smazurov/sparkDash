@@ -494,6 +494,10 @@ export interface LlmMetrics {
   slotsActive: number | null;
   slotsTotal: number;
   generationTps: number;
+  /** False when decode has no usable measurement, not an observed zero rate. */
+  generationMeasurementValid?: boolean;
+  /** Last completed decode observation, epoch ms (Halogen); retained rates do not refresh this. */
+  generationMeasuredAt?: number | null;
   /** How generationTps was measured when a backend exposes a fallback. */
   generationTpsSource?: "window" | "slot-mean" | "completed" | null;
   /**
