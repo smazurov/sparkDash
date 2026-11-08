@@ -62,15 +62,14 @@ describe("kioskCard", () => {
     expect(kioskCard(s, null, null).rates?.prefill).toBe("1,000");
   });
 
-  it("never calls a completed decode rate live or an absent one zero", () => {
+  it("keeps unsupported aggregate decode unavailable even with a stale numeric value", () => {
     const s = makeSpark("halogen");
     Object.assign(s.metrics.llm[0], { backend: "halogen", measurementValid: true,
       generationMeasurementValid: false, generationTps: 0, generationTpsSource: null });
     expect(kioskCard(s, null, null).rates?.decode).toBe("—");
-    Object.assign(s.metrics.llm[0], { generationMeasurementValid: true,
-      generationTps: 62.7, generationTpsSource: "completed" });
+    Object.assign(s.metrics.llm[0], { generationTps: 25.24 });
     const rates = kioskCard(s, null, null).rates;
-    expect(rates?.decode).toBe("62.7");
+    expect(rates?.decode).toBe("—");
     expect(rates?.decodeLive).toBe(false);
   });
 

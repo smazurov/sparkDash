@@ -72,6 +72,17 @@ test("LlmDailyStore: invalid decode leaves prefill recording independent", () =>
   assert.equal(days[0].prefillAvg, 1000);
 });
 
+test("LlmDailyStore: unsupported decode hides legacy means without deleting stored data or prefill", () => {
+  const store = tmpStore();
+  const now = new Date("2026-08-16T12:00:00.000Z");
+  store.record("spark-a", 8731, { generationTps: 25.24, prefillTps: 1000 }, now);
+  const view = store.getSeries("spark-a", 8731, { days: 1, now, decodeAvailable: false });
+  assert.equal(view.days[0].decodeMax, null);
+  assert.equal(view.days[0].decodeAvg, null);
+  assert.equal(view.days[0].prefillMax, 1000);
+  assert.equal(store.getSeries("spark-a", 8731, { days: 1, now }).days[0].decodeMax, 25.24);
+});
+
 test("LlmDailyStore: skips unavailable probes", () => {
   const store = tmpStore();
   const now = new Date("2026-08-16T12:00:00.000Z");

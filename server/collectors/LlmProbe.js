@@ -27,7 +27,7 @@ const ENGINE_VERSION_TTL_MS = 10 * 60_000;
  */
 const TENSORFOLD_PREFILL_WINDOW_MS = 60_000;
 // Same completed-request window as TensorFold; never turn a held rate into live activity.
-const HALOGEN_COMPLETED_WINDOW_MS = 60_000;
+const HALOGEN_PREFILL_WINDOW_MS = 60_000;
 /**
  * TensorFold's cached-prompt counter, by precedence. Upstream
  * (ashhart/TensorFold) publishes `prompt_tokens_cached_total`; a build whose
@@ -278,7 +278,7 @@ export class LlmProbe {
     /** Halogen: completed-request token/time counters, never live decode progress. */
     this._halogenBase = null;
     this._halogenPrefillWindow = [];
-    this._halogenDecodeWindow = [];
+    this._halogenLastCompletionAt = null;
 
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
@@ -493,7 +493,7 @@ export class LlmProbe {
 
   _noteFailure(message) {
     this._halogenPrefillWindow = [];
-    this._halogenDecodeWindow = [];
+    this._halogenLastCompletionAt = null;
     this._mlxServeLive = null;
     this.models = [];
     this.error = message;
@@ -545,7 +545,7 @@ export class LlmProbe {
     this._splashBase = null;
     this._halogenBase = null;
     this._halogenPrefillWindow = [];
-    this._halogenDecodeWindow = [];
+    this._halogenLastCompletionAt = null;
     this.slotState.clear();
     this._mlxServeLive = null;
     this.lastTokenCounts = { input: 0, output: 0 };
@@ -990,7 +990,7 @@ export class LlmProbe {
         if (this.backendType === "halogen") {
           this._halogenBase = null;
           this._halogenPrefillWindow = [];
-          this._halogenDecodeWindow = [];
+          this._halogenLastCompletionAt = null;
           return this._defaultLlm();
         }
         return this._getSnapshot();
@@ -1054,7 +1054,7 @@ export class LlmProbe {
         if (auth === "auth") {
           this._halogenBase = null;
           this._halogenPrefillWindow = [];
-          this._halogenDecodeWindow = [];
+          this._halogenLastCompletionAt = null;
           return this._defaultLlm();
         }
         if (!res.ok) throw new Error(`Halogen ${path} unreachable`);
@@ -1947,10 +1947,12 @@ export class LlmProbe {
   /**
    * Halogen v0.20 /metrics sums per-request timings at completion. These are NOT
    * live counters: dividing a long request's tokens by the poll interval spikes.
-   * Decode and prefill each sum tokens and engine seconds over completions observed
-   * in the last minute. Prefill excludes cache hits, like TensorFold. Neither rate
-   * proves a live phase. Windows expire without a fresh completion and clear on
-   * interruption/reset. Scrape-reset *_tokens_seconds gauges are not used.
+   * generationTps is AGGREGATE throughput. Summed request durations overlap under
+   * concurrency, so output tokens / summed decode seconds is NOT that metric.
+   * Neither a completion spike / scrape interval nor current occupancy fixes this.
+   * Keep aggregate decode unmeasured; preserve the output counter and completion
+   * observation for the ledger/activity only. Prefill retains its computed-only
+   * completed window, like TensorFold. Scrape-reset gauges are not used.
    */
   _applyHalogenMetrics(txt, dtSec) {
     const counter = (name) => {
@@ -1989,14 +1991,14 @@ export class LlmProbe {
     this.perStreamPrefillTps = null;
     if (why) {
       this._halogenPrefillWindow = [];
-      this._halogenDecodeWindow = [];
+      this._halogenLastCompletionAt = null;
       this._markUnmeasured(why, { reseed: false });
     } else {
       const at = Date.now();
       const computed = now.in - before.in;
       const seconds = now.prefillSec - before.prefillSec;
       if (computed > 0 && seconds > 0) this._halogenPrefillWindow.push({ computed, seconds, at });
-      this._halogenPrefillWindow = this._halogenPrefillWindow.filter((w) => w.at > at - HALOGEN_COMPLETED_WINDOW_MS);
+      this._halogenPrefillWindow = this._halogenPrefillWindow.filter((w) => w.at > at - HALOGEN_PREFILL_WINDOW_MS);
       const tokens = this._halogenPrefillWindow.reduce((sum, w) => sum + w.computed, 0);
       const elapsed = this._halogenPrefillWindow.reduce((sum, w) => sum + w.seconds, 0);
       // As in TensorFold, sub-50ms windows are too noisy to publish. Null source
@@ -2005,16 +2007,7 @@ export class LlmProbe {
         this.prefillTps = Math.round(tokens / elapsed * 100) / 100;
         this.prefillTpsSource = "completed-computed";
       }
-      const generated = now.out - before.out;
-      const decodeSeconds = now.decodeSec - before.decodeSec;
-      if (generated > 0 && decodeSeconds > 0) this._halogenDecodeWindow.push({ generated, seconds: decodeSeconds, at });
-      this._halogenDecodeWindow = this._halogenDecodeWindow.filter((w) => w.at > at - HALOGEN_COMPLETED_WINDOW_MS);
-      const decodeTokens = this._halogenDecodeWindow.reduce((sum, w) => sum + w.generated, 0);
-      const decodeElapsed = this._halogenDecodeWindow.reduce((sum, w) => sum + w.seconds, 0);
-      if (decodeElapsed > 0) {
-        this.generationTps = Math.round(decodeTokens / decodeElapsed * 100) / 100;
-        this.generationTpsSource = "completed";
-      }
+      if (now.out > before.out) this._halogenLastCompletionAt = at;
     }
     this.totalOutputTokens = now.out;
     this.totalCachedTokens = now.cached;
@@ -3838,8 +3831,8 @@ export class LlmProbe {
       slotsActive: this.slotsActive,
       slotsTotal: this.slotsTotal,
       generationTps: this.generationTps,
-      generationMeasurementValid: this.backendType !== "halogen" || this.generationTpsSource === "completed",
-      generationMeasuredAt: this.backendType === "halogen" ? this._halogenDecodeWindow.at(-1)?.at ?? null : null,
+      generationMeasurementValid: this.backendType !== "halogen",
+      generationMeasuredAt: this.backendType === "halogen" ? this._halogenLastCompletionAt : null,
       perStreamTps: this.perStreamTps,
       perStreamPrefillTps: this.perStreamPrefillTps,
       prefillTpsSource: this.prefillTpsSource,

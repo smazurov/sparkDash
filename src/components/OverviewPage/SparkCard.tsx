@@ -496,7 +496,7 @@ function SparkCardImpl({
                     : undefined
                 }
               >
-                <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isHalogen ? t("card.decodeCompleted") : isTensorFold ? t("card.decodeAggregate") : t("card.decode")}</div>
+                <div className="eyebrow" title={isTensorFold ? t("card.decodeAggregateHelp") : undefined}>{isTensorFold || isHalogen ? t("card.decodeAggregate") : t("card.decode")}</div>
                 {llm.measurementValid === false || llm.generationMeasurementValid === false || (isHalogen && llm.generationTps <= 0) ? (
                   <div className="big-num ov-tps__num" title={llm.measurementError ?? (isHalogen ? t("card.halogenRatesHelp") : t("card.statsCouldNotBeRead"))}>—</div>
                 ) : isStrata && llm.decodeActive && llm.generationTps <= 0 ? (

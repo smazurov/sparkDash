@@ -550,8 +550,8 @@ export class SparkMonitor {
       const port = probes[i]?.port;
       if (port == null || !entry || typeof entry !== "object") return entry;
       ports.add(port);
-      // Completed-rate observation times, not each display refresh, stamp last
-      // served. Neither a held prefill nor decode rate is ongoing work.
+      // Output-counter advances and completed prefill observations stamp last
+      // served. An unavailable aggregate rate or held prefill is not ongoing work.
       const completedRates = entry.backend === "halogen";
       const gen = completedRates ? 0 : Number(entry.generationTps);
       const pre = completedRates ? 0 : Number(entry.prefillTps);

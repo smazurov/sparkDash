@@ -341,11 +341,11 @@ test("retention: 1-minute buckets leave after 48 h, 15-minute buckets after 30 d
   assert.deepEqual(s.query("a", "30d", T0 + 31 * DAY).points.map((p) => p.gpuUtil.avg), [20, 30]);
 });
 
-test("Halogen completed-rate gaps survive aggregation and persisted history reload", async (t) => {
+test("per-rate measurement gaps survive aggregation and persisted history reload", async (t) => {
   const tiersFile = path.join(tmpDir(t), "metrics-history.json");
   const s = store({ tiersFile });
   const snapshot = gb10Snapshot({ llmPorts: [8731] });
-  snapshot.metrics.llm = [{ available: true, measurementValid: true, backend: "halogen",
+  snapshot.metrics.llm = [{ available: true, measurementValid: true, backend: "tensorfold",
     generationMeasurementValid: false, prefillMeasurementValid: false, generationTps: 0, prefillTps: 0, kvCacheUsage: 0.5 }];
   const record = (at) => rec(s, T0 + at, extractSample(snapshot), { llmPorts: [8731] });
   record(0);
