@@ -746,17 +746,22 @@ is needed; all monitoring is read-only HTTP. An optional API key uses the existi
 
 The adapter follows Halogen's [v0.20.0 observability contract](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/docs/codex.md#observability):
 
-- **Decode · last 60s / Prefill · last 60s** each sum tokens and corresponding engine seconds
-  from completions observed in the last minute, then divide those sums—**not the polling interval**.
-  Prefill follows TensorFold's completed-window convention, counting **computed tokens only** and
-  excluding cache hits. Both stay visible between completions without pretending to be live
-  throughput, then expire to **—**. Prefill windows with less than 50 ms of measured work are not
-  published. Startup, restart, failed reads and polling gaps re-seed and discard both windows;
-  no lifetime-counter spike or measurement from a prior model. `generationMeasurementValid` and
-  `prefillMeasurementValid` independently leave history/export gaps when false, not fabricated
-  zeroes. Their `*MeasuredAt` timestamps keep retained rates from extending last-served time or
-  marking an idle engine busy. Live widgets (including benchmark live TPS, sidebar and fleet
-  totals) exclude completed rates. Scrape-reset `*_tokens_seconds` gauges are not used.
+- **Decode is aggregate throughput**, as on the other backends. Halogen's polling endpoints do
+  not expose that measurement: output tokens divided by summed request durations is a per-request
+  mean because concurrent durations overlap, not aggregate TPS. The adapter leaves
+  `generationMeasurementValid: false`, shows **—**, and publishes no decode-rate history/export
+  sample. It does not substitute that mean into `perStreamTps`, multiply by occupancy, or divide
+  completion bursts by the scrape interval. Output totals and observed completions still feed
+  the token ledger and last-served time. The benchmark independently measures its own streams;
+  its aggregate result is not used as global engine telemetry.
+- **Prefill · last 60s** follows TensorFold's completed-window convention: sum computed tokens and
+  engine prefill seconds over completions observed in the last minute, then divide those sums.
+  Cache hits are excluded, sub-50ms windows are not published, and expiry becomes **—** and a
+  history/export gap, not zero. Failures, resets and polling gaps discard the window and re-seed.
+  Retention does not imply live activity. Scrape-reset `*_tokens_seconds` gauges are not used.
+- **Legacy decode history:** previous adapters incorrectly stored per-request means as aggregate
+  decode. History and daily API views exclude those readings on ports currently identified as
+  Halogen, without deleting stored files or changing other ports, prefill, KV or token totals.
 - **Token totals**: `llamacpp:tokens_predicted_total` is generated output;
   `llamacpp:prompt_tokens_total` is computed input. Adding `halogen:prompt_tokens_cached_total`
   gives the full prompt total for the ledger. Cache hit ratio is cached / full prompt.

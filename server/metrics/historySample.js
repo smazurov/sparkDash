@@ -7,6 +7,20 @@ import { finite, llmKey } from "./historyTiers.js";
  * down — is left out, so it becomes a gap instead of a fake zero.
  */
 
+/**
+ * Halogen has never supplied aggregate decode telemetry. Earlier adapters wrongly
+ * recorded per-request means as genTps. Exclude those from history responses while
+ * that backend is selected; keep the files and every other metric/endpoint intact.
+ */
+export function unsupportedGenerationPorts(snapshot) {
+  const ports = Array.isArray(snapshot?.llmPorts) ? snapshot.llmPorts : [];
+  const entries = Array.isArray(snapshot?.metrics?.llm) ? snapshot.metrics.llm : [];
+  return new Set(entries.flatMap((entry, i) => {
+    const port = Number.isInteger(entry?.port) ? entry.port : ports[i];
+    return entry?.backend === "halogen" && ports.includes(port) ? [port] : [];
+  }));
+}
+
 /** The all-zero result a failed GPU collection returns (see SystemCollector). */
 function isDefaultGpu(gpu) {
   return (

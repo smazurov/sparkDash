@@ -502,10 +502,11 @@ export interface LlmMetrics {
   /** Occupied slots; null when the backend does not report occupancy. */
   slotsActive: number | null;
   slotsTotal: number;
+  /** Aggregate decode throughput across the endpoint, never a per-request mean. */
   generationTps: number;
-  /** False when decode has no usable measurement, not an observed zero rate. */
+  /** False when aggregate decode has no usable measurement, not an observed zero rate. */
   generationMeasurementValid?: boolean;
-  /** Last completed decode observation, epoch ms (Halogen); retained rates do not refresh this. */
+  /** Last observed output-counter advance, epoch ms (Halogen); activity only, not an aggregate rate. */
   generationMeasuredAt?: number | null;
   /** How generationTps was measured when a backend exposes a fallback. */
   generationTpsSource?: "window" | "slot-mean" | "completed" | null;
@@ -592,7 +593,8 @@ export interface LlmMetrics {
 /** One UTC day of busy tok/s rollups (null avg = no busy samples). */
 export interface LlmDailyDay {
   date: string;
-  decodeMax: number;
+  /** null when aggregate decode is unsupported, including legacy non-aggregate recordings. */
+  decodeMax: number | null;
   decodeAvg: number | null;
   prefillMax: number;
   prefillAvg: number | null;

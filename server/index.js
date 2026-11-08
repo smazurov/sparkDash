@@ -56,6 +56,7 @@ import { llmProbeHost } from "./collectors/llmHost.js";
 import { onceClose, resolveLlmHttpTarget } from "./collectors/llmTunnel.js";
 import { formatLlmBaseUrl, parseLlmTargetInput } from "../src/shared/llmTarget.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
+import { unsupportedGenerationPorts } from "./metrics/historySample.js";
 import {
   createLlmTokenRuntime,
   registerLlmTokenTotalsRoute,
@@ -813,6 +814,7 @@ registerUnitHistoryRoutes(app, {
   store: unitHistory,
   hasUnit: (id) => Boolean(registry.getSpark(id)),
   isEnabled: metricsHistoryEnabled,
+  getSnapshot: (id) => monitors.get(id)?.snapshot(),
 });
 
 app.get("/api/sparks/:id/metrics", (req, res) => {
@@ -1485,7 +1487,8 @@ app.get("/api/sparks/:id/llm/daily", (req, res) => {
   }
   let days = req.query.days != null ? Number(req.query.days) : 14;
   if (!Number.isFinite(days)) days = 14;
-  res.json(llmDaily.getSeries(spark.id, port, { days }));
+  const decodeAvailable = !unsupportedGenerationPorts(monitors.get(spark.id)?.snapshot()).has(port);
+  res.json(llmDaily.getSeries(spark.id, port, { days, decodeAvailable }));
 });
 
 /**

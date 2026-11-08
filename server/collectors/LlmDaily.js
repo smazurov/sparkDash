@@ -174,7 +174,7 @@ export class LlmDailyStore {
    * Calendar-aligned last `days` UTC dates (zeros for missing).
    * @param {string} sparkId
    * @param {number} port
-   * @param {{ days?: number, now?: Date }} [opts]
+   * @param {{ days?: number, now?: Date, decodeAvailable?: boolean }} [opts]
    */
   getSeries(sparkId, port, opts = {}) {
     const n = Math.min(MAX_DAYS, Math.max(1, Number(opts.days) || 14));
@@ -185,7 +185,11 @@ export class LlmDailyStore {
     for (let i = n - 1; i >= 0; i--) {
       const d = new Date(now.getTime() - i * 86400000);
       const date = utcDateKey(d);
-      out.push(publicDay(date, stored[date]));
+      const day = publicDay(date, stored[date]);
+      // Do not expose legacy per-request averages as aggregate history. This is
+      // a read-only view: persisted recordings and prefill rollups are untouched.
+      if (opts.decodeAvailable === false) day.decodeMax = day.decodeAvg = null;
+      out.push(day);
     }
     return { sparkId, port, days: out };
   }

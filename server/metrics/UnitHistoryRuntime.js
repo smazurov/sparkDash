@@ -6,7 +6,7 @@
  */
 import { collectionWasSuccessful } from "../collectors/SystemCollector.js";
 import { deviceReadings } from "./UnitHistory.js";
-import { extractSample } from "./historySample.js";
+import { extractSample, unsupportedGenerationPorts } from "./historySample.js";
 import { HISTORY_RANGES } from "./historyTiers.js";
 
 /** One sample per collector poll at the default 2 s cadence. */
@@ -79,7 +79,7 @@ export function createGpuHistoryHandler({ store, hasUnit, now = Date.now }) {
  * GET /api/sparks/:id/history?range=1h|6h|24h|7d|30d (default 1h) — the bucketed tiers.
  * 404 for an unknown unit, 400 for a bad range, `{ enabled: false }` while the setting is off.
  */
-export function createUnitHistoryHandler({ store, hasUnit, isEnabled, now = Date.now }) {
+export function createUnitHistoryHandler({ store, hasUnit, isEnabled, getSnapshot = () => null, now = Date.now }) {
   return (req, res) => {
     const id = req.params?.id;
     if (!hasUnit(id)) return res.status(404).json({ error: "Spark not found" });
@@ -90,7 +90,12 @@ export function createUnitHistoryHandler({ store, hasUnit, isEnabled, now = Date
       });
     }
     if (!isEnabled()) return res.json({ enabled: false });
-    return res.json({ enabled: true, ...store.query(id, range, now()) });
+    const data = store.query(id, range, now());
+    const unsupported = unsupportedGenerationPorts(getSnapshot(id));
+    const llm = data.llm.map((entry) => unsupported.has(entry.port)
+      ? { ...entry, points: entry.points.map(({ genTps: _invalid, ...point }) => point) }
+      : entry);
+    return res.json({ enabled: true, ...data, llm });
   };
 }
 

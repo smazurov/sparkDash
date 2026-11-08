@@ -74,10 +74,10 @@ describe("metricsStore timestamp contract", () => {
     expect(getMetricHistorySamples(spark.id, "llm:8731.tps")).toHaveLength(4);
   });
 
-  it("records a completed decode window without fake zeroes before measurement or after expiry", () => {
+  it("records measured aggregate decode without fake zeroes across unmeasured polls", () => {
     const spark = makeSpark();
     spark.llmPorts = [8731];
-    Object.assign(spark.metrics.llm[0], { backend: "halogen", measurementValid: true,
+    Object.assign(spark.metrics.llm[0], { backend: "tensorfold", measurementValid: true,
       generationMeasurementValid: false, generationTps: 0 });
     ingestSnapshots([spark], 1000);
     Object.assign(spark.metrics.llm[0], { generationMeasurementValid: true, generationTps: 62.7 });

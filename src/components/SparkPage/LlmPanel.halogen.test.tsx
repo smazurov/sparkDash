@@ -13,21 +13,23 @@ function halogen(overrides: Record<string, unknown> = {}) {
     engineVersion: "0.20.0", modelId: "gpu-model", models: ["gpu-model", "npu-model"],
     contextLength: 262144, slotsActive: 2, slotsTotal: 4,
     requestsRunning: 2, requestsWaiting: 1, kvCacheUsage: 0.5,
-    generationTps: 50, generationTpsSource: "completed" as const,
+    generationTps: 0, generationMeasurementValid: false, generationTpsSource: null,
     prefillTps: 1000, prefillTpsSource: "completed-computed" as const,
     mtpAcceptanceRate: 0.8, perStreamTps: null, ...overrides };
 }
 
 describe("Halogen monitoring", () => {
-  it("shows the engine/version and completed GPU rates, never cache-inclusive live rates", () => {
+  it("shows GPU telemetry and prefill without substituting a mean for aggregate decode", () => {
     const { container } = render(<LlmPanel llm={halogen()} sparkId="fixture" llmPort={8731} />);
     expect(container.textContent).toContain("Halogen · :8731 · v0.20.0");
-    expect(container.textContent).toContain("Decode · last 60s");
+    expect(container.textContent).toContain("Decode · aggregate");
     expect(container.textContent).toContain("Prefill · last 60s");
     expect(container.textContent).toContain("Computed tokens only");
     expect(container.textContent).toContain("NPU activity is not included");
     expect(container.textContent).not.toContain("includes cached tokens");
-    expect(container.textContent).toContain("50.0");
+    expect([...container.querySelectorAll(".sp-big-lg")][0].textContent).toBe("—");
+    expect(container.textContent).toContain("Aggregate decode is unavailable");
+    expect(container.textContent).not.toContain("Decode · last 60s");
     expect(container.textContent).toContain("1,000");
     expect(container.textContent).toContain("2 / 4");
     expect(container.textContent).toContain("2 / 1");
@@ -62,16 +64,14 @@ describe("Halogen monitoring", () => {
     expect(container.querySelector("[data-llm-idle]")?.textContent).toMatch(/^Idle/);
   });
 
-  it("holds completed decode while idle, then hides an expired measurement independently of prefill", () => {
-    const held = halogen({ generationMeasurementValid: true, generationMeasuredAt: Date.now() - 20_000,
+  it("never displays a stale per-request mean as aggregate decode", () => {
+    const llm = halogen({ generationTps: 25.24, generationMeasuredAt: Date.now() - 20_000,
       requestsRunning: 0, requestsWaiting: 0, slotsActive: 0 });
-    const { container, root } = render(<LlmPanel llm={held} sparkId="fixture" llmPort={8731} />);
+    const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8731} />);
     expect(container.querySelector("[data-llm-idle]")?.textContent).toMatch(/^Idle/);
-    expect([...container.querySelectorAll(".sp-big-lg")][0].textContent).toContain("50.0");
-    act(() => root.render(<LlmPanel llm={{ ...held, generationMeasurementValid: false,
-      generationTpsSource: null, generationMeasuredAt: null }} sparkId="fixture" llmPort={8731} />));
     expect([...container.querySelectorAll(".sp-big-lg")][0].textContent).toBe("—");
     expect([...container.querySelectorAll(".sp-big-lg")][1].textContent).toContain("1,000");
+    expect(container.textContent).not.toContain("25.2");
   });
 
   it("leaves unreadable rates unmeasured rather than reporting healthy zeroes", () => {

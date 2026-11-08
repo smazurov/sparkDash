@@ -796,7 +796,7 @@ export function LlmPanel({
                   : undefined
               }
             >
-              <span className="eyebrow">{isHalogen ? t("llm.decodeCompleted") : isTensorFold ? t("llm.decodeAggregate") : t("llm.decode")}</span>
+              <span className="eyebrow">{isTensorFold || isHalogen ? t("llm.decodeAggregate") : t("llm.decode")}</span>
               <div className="big-num sp-big-lg">
                 {!measured || llm?.generationMeasurementValid === false || (isHalogen && generationTps <= 0) ? (
                   <span title={llm?.measurementError ?? undefined}>—</span>
