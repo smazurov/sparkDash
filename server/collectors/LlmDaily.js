@@ -139,12 +139,12 @@ export class LlmDailyStore {
   /**
    * @param {string} sparkId
    * @param {number} port
-   * @param {{ available?: boolean, generationTps?: number, prefillTps?: number, cachedPrefillTps?: number|null, uncachedPrefillTps?: number|null }} metrics
+   * @param {{ available?: boolean, measurementValid?: boolean, prefillMeasurementValid?: boolean, generationTps?: number, prefillTps?: number, cachedPrefillTps?: number|null, uncachedPrefillTps?: number|null }} metrics
    * @param {Date} [now]
    */
   record(sparkId, port, metrics, now = new Date()) {
     if (!sparkId || !Number.isInteger(port)) return;
-    if (!metrics || metrics.available === false) return;
+    if (!metrics || metrics.available === false || metrics.measurementValid === false) return;
 
     const key = seriesKey(sparkId, port);
     const date = utcDateKey(now);
@@ -154,8 +154,8 @@ export class LlmDailyStore {
 
     let changed = false;
     changed = ingest(day, "decode", metrics.generationTps) || changed;
-    changed = ingest(day, "prefill", metrics.prefillTps) || changed;
-    if (metrics.cachedPrefillTps != null || metrics.uncachedPrefillTps != null) {
+    if (metrics.prefillMeasurementValid !== false) changed = ingest(day, "prefill", metrics.prefillTps) || changed;
+    if (metrics.prefillMeasurementValid !== false && (metrics.cachedPrefillTps != null || metrics.uncachedPrefillTps != null)) {
       if (!day.hasSplit) {
         day.hasSplit = true;
         changed = true;

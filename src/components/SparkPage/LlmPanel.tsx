@@ -441,6 +441,7 @@ export function LlmPanel({
   const prefillTps = llm?.prefillTps ?? 0;
   const isStrata = llm?.backend === "strata";
   const isTensorFold = llm?.backend === "tensorfold";
+  const isHalogen = llm?.backend === "halogen";
   const completedPrefill = llm?.prefillTpsSource?.startsWith("completed-") === true;
   const showPrefillSplit = llm?.cachedPrefillTps != null || llm?.uncachedPrefillTps != null;
   const cachedPrefillTps = llm?.cachedPrefillTps ?? 0;
@@ -450,7 +451,8 @@ export function LlmPanel({
   const measured = llm?.measurementValid !== false;
   // While nothing is flowing, say when the endpoint last served.
   const idleSince = formatSince(llm?.lastActiveAt);
-  const idleNote = available && measured && isLlmIdle({ generationTps, prefillTps, prefillActive: llm?.prefillActive, decodeActive: llm?.decodeActive })
+  const idle = llm != null && isLlmIdle(llm);
+  const idleNote = available && measured && idle
     ? idleSince ? t("llm.idleLastServed", { age: idleSince }) : t("llm.idle")
     : null;
 
@@ -523,7 +525,7 @@ export function LlmPanel({
   const isVllm = llm != null && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "flare" || llm.backend === "locals" || llm.backend === "splash");
   // FreeToken reports KV use, active requests and a TTFT mean in /v1/stats; the tiles below are null-gated.
   const isFreeToken = llm?.backend === "freetoken";
-  const showEngineTiles = isVllm || isFreeToken || isStrata;
+  const showEngineTiles = isVllm || isFreeToken || isStrata || isHalogen;
   const kvTone =
     llm?.kvCacheUsage == null
       ? ""
@@ -787,14 +789,16 @@ export function LlmPanel({
             <div
               className="sp-metric"
               title={
-                isStrata
+                isHalogen
+                  ? t("llm.halogenRatesHelp")
+                  : isStrata
                   ? t("llm.strataDecodeHelp")
                   : undefined
               }
             >
-              <span className="eyebrow">{isTensorFold ? t("llm.decodeAggregate") : t("llm.decode")}</span>
+              <span className="eyebrow">{isHalogen ? t("llm.decodeCompleted") : isTensorFold ? t("llm.decodeAggregate") : t("llm.decode")}</span>
               <div className="big-num sp-big-lg">
-                {!measured ? (
+                {!measured || (isHalogen && generationTps <= 0) ? (
                   <span title={llm?.measurementError ?? undefined}>—</span>
                 ) : isStrata && llm?.decodeActive && generationTps <= 0 ? (
                   <>
@@ -835,16 +839,18 @@ export function LlmPanel({
             <div
               className="sp-metric"
               title={
-                isStrata
+                isHalogen
+                  ? t("llm.halogenRatesHelp")
+                  : isStrata
                   ? t("llm.strataPrefillHelp")
                   : llm?.backend === "tensorfold" && llm.uncachedPrefillTps != null
                     ? t("llm.tensorfoldPrefillHelp")
                     : t("llm.prefillHelp")
               }
             >
-              <span className="eyebrow">{completedPrefill ? t("llm.prefillCompleted") : t("llm.prefill")}</span>
+              <span className="eyebrow">{isHalogen ? t("llm.prefillRecent") : completedPrefill ? t("llm.prefillCompleted") : t("llm.prefill")}</span>
               <div className="big-num sp-big-lg">
-                {!measured ? (
+                {!measured || llm?.prefillMeasurementValid === false || (isHalogen && prefillTps <= 0) ? (
                   <span title={llm?.measurementError ?? undefined}>—</span>
                 ) : llm?.prefillActive && prefillTps <= 0 ? (
                   <>
@@ -865,12 +871,13 @@ export function LlmPanel({
               {isStrata && prefillTps > 0 && <span className="sp-avg">{t("llm.lastReportedMean")}</span>}
               {isTensorFold && !completedPrefill && prefillTps <= 0 && <span className="sp-avg">{t("llm.notMeasuredLive")}</span>}
               {measured && completedPrefill && (
-                <span className="sp-avg" title={t("llm.completedPrefillHelp")}>
-                  {t("llm.effectiveIncludesCached")}
+                <span className="sp-avg" title={llm?.prefillTpsSource === "completed-computed" ? t("llm.halogenRatesHelp") : t("llm.completedPrefillHelp")}>
+                  {llm?.prefillTpsSource === "completed-computed" ? t("llm.computedTokensOnly") : t("llm.effectiveIncludesCached")}
                 </span>
               )}
             </div>
           </div>
+          {isHalogen && <span className="sp-avg">{t("llm.halogenRatesHelp")}</span>}
           {showPrefillSplit && (
             <div className="sp-decode sp-decode--split">
               <div

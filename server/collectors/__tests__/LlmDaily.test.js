@@ -49,6 +49,19 @@ test("LlmDailyStore: ds4 split rates + calendar zeros", () => {
   assert.equal(days[2].uncachedPrefillMax, 80);
 });
 
+test("LlmDailyStore: invalid measurements never enter daily averages", () => {
+  const store = tmpStore();
+  const now = new Date("2026-08-16T12:00:00.000Z");
+  store.record("spark-a", 8731, { available: true, measurementValid: false, generationTps: 999, prefillTps: 999 }, now);
+  store.record("spark-a", 8731, { available: true, prefillMeasurementValid: false,
+    generationTps: 30, prefillTps: 999, cachedPrefillTps: 999, uncachedPrefillTps: 999 }, now);
+  const { days } = store.getSeries("spark-a", 8731, { days: 1, now });
+  assert.equal(days[0].decodeAvg, 30);
+  assert.equal(days[0].prefillAvg, null);
+  assert.equal(days[0].cachedPrefillAvg, null);
+  assert.equal(days[0].uncachedPrefillAvg, null);
+});
+
 test("LlmDailyStore: skips unavailable probes", () => {
   const store = tmpStore();
   const now = new Date("2026-08-16T12:00:00.000Z");

@@ -343,8 +343,10 @@ function addLlm(samples, base, snapshot) {
     if (entry.measurementValid === false) return;
     samples.add("sparkdash_llm_generation_tokens_per_second", labels, entry.generationTps);
     samples.add("sparkdash_llm_per_stream_tokens_per_second", labels, entry.perStreamTps);
-    samples.add("sparkdash_llm_per_stream_prefill_tokens_per_second", labels, entry.perStreamPrefillTps);
-    samples.add("sparkdash_llm_prefill_tokens_per_second", labels, entry.prefillTps);
+    if (entry.prefillMeasurementValid !== false) {
+      samples.add("sparkdash_llm_per_stream_prefill_tokens_per_second", labels, entry.perStreamPrefillTps);
+      samples.add("sparkdash_llm_prefill_tokens_per_second", labels, entry.prefillTps);
+    }
     samples.add("sparkdash_llm_kv_cache_usage_ratio", labels, entry.kvCacheUsage);
     samples.add("sparkdash_llm_requests_running", labels, entry.requestsRunning);
     samples.add("sparkdash_llm_requests_waiting", labels, entry.requestsWaiting);
@@ -574,7 +576,7 @@ export function unitMetricJson(entry) {
       return;
     }
     if (finite(ll.generationTps)) e.generation_tokens_per_second = ll.generationTps;
-    if (finite(ll.prefillTps)) e.prefill_tokens_per_second = ll.prefillTps;
+    if (ll.prefillMeasurementValid !== false && finite(ll.prefillTps)) e.prefill_tokens_per_second = ll.prefillTps;
     if (finite(ll.kvCacheUsage)) e.kv_cache_usage_ratio = ll.kvCacheUsage;
     if (finite(ll.requestsRunning)) e.requests_running = ll.requestsRunning;
     if (finite(ll.requestsWaiting)) e.requests_waiting = ll.requestsWaiting;

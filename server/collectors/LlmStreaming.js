@@ -179,6 +179,11 @@ export async function readServerGenerationTokens(baseUrl, opts = {}) {
         /^splash_decode_output_tokens_total(?:\{[^}]*\})?\s+([\d.eE+-]+)\s*$/gm
       );
       if (splash != null) return splash;
+      // Halogen and llama.cpp: completed generation tokens, never draft proposals.
+      const llama = fromSeries(
+        /^llamacpp:tokens_predicted_total(?:\{[^}]*\})?\s+([\d.eE+-]+)\s*$/gm
+      );
+      if (llama != null) return llama;
     }
   } catch {
     /* try next */

@@ -26,6 +26,8 @@ const ENGINE_VERSION_TTL_MS = 10 * 60_000;
  * computing almost nothing, so a rate per poll window swings between 30 and 1,800 tok/s on the same engine.
  */
 const TENSORFOLD_PREFILL_WINDOW_MS = 60_000;
+// Same completed-request window as TensorFold; never turn a held rate into live activity.
+const HALOGEN_PREFILL_WINDOW_MS = 60_000;
 /**
  * TensorFold's cached-prompt counter, by precedence. Upstream
  * (ashhart/TensorFold) publishes `prompt_tokens_cached_total`; a build whose
@@ -39,7 +41,7 @@ const TENSORFOLD_CACHED_PROMPT_COUNTERS = [
   "prefix_cache_hits_total",
 ];
 /** owned_by values that are exactly an engine's own name (each is also its backend type). */
-const OWNED_BY_ENGINES = new Set(["locals", "splash", "tensorfold", "ds4", "sglang", "exl3", "q27", "freetoken", "radiance", "ninfer"]);
+const OWNED_BY_ENGINES = new Set(["locals", "splash", "tensorfold", "ds4", "sglang", "exl3", "q27", "freetoken", "radiance", "ninfer", "halogen"]);
 /** Current SGLang names first. Deprecated aliases still work but log a warning per hit. */
 const SGLANG_SERVER_INFO_PATHS = ["/server_info", "/get_server_info"];
 const SGLANG_MODEL_INFO_PATHS = ["/model_info", "/get_model_info"];
@@ -126,7 +128,7 @@ export class LlmProbe {
     this._openTunnel = openSshLlmTunnel;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'lmstudio' | 'ollama' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'ninfer' | 'freetoken' | 'radiance' | 'strata' | 'flare' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'lmstudio' | 'ollama' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'ninfer' | 'freetoken' | 'radiance' | 'strata' | 'flare' | 'halogen' | null
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -273,6 +275,9 @@ export class LlmProbe {
     this._localsBase = null;
     /** Splash: the last scrape's decode and prefill counters; null until one is read. */
     this._splashBase = null;
+    /** Halogen: completed-request token/time counters, never live decode progress. */
+    this._halogenBase = null;
+    this._halogenPrefillWindow = [];
 
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
@@ -486,6 +491,7 @@ export class LlmProbe {
   }
 
   _noteFailure(message) {
+    this._halogenPrefillWindow = [];
     this._mlxServeLive = null;
     this.models = [];
     this.error = message;
@@ -535,6 +541,8 @@ export class LlmProbe {
     this._seedNext = false;
     this._localsBase = null;
     this._splashBase = null;
+    this._halogenBase = null;
+    this._halogenPrefillWindow = [];
     this.slotState.clear();
     this._mlxServeLive = null;
     this.lastTokenCounts = { input: 0, output: 0 };
@@ -637,6 +645,7 @@ export class LlmProbe {
       this.backendType !== "locals" &&
       this.backendType !== "splash" &&
       this.backendType !== "tensorfold" &&
+      this.backendType !== "halogen" &&
       this.backendType !== "freetoken" &&
       this.backendType !== "radiance" &&
       this.backendType !== "flare"
@@ -648,6 +657,17 @@ export class LlmProbe {
         if (auth === "ok") {
           const slots = await slotRes.json();
           if (Array.isArray(slots)) {
+            // Halogen's /slots only describes capacity ({id, n_ctx}), not llama.cpp
+            // activity. Its explicit model-card identity wins over that compatibility shim.
+            try {
+              const res = await this._fetch(`${this.baseUrl}/v1/models`);
+              const data = res.ok ? await res.json() : null;
+              if (Array.isArray(data?.data) && data.data.some((m) => typeof m?.owned_by === "string" && /^halogen$/i.test(m.owned_by))) {
+                this.serverIsOpenAI = true;
+                this.backendType = "halogen";
+                return;
+              }
+            } catch { /* ordinary llama.cpp still works when model cards are unavailable */ }
             this.serverIsOpenAI = false;
             this.backendType = "llama.cpp";
             return;
@@ -697,11 +717,11 @@ export class LlmProbe {
 
   /**
    * Classify an OpenAI-compatible server: LM Studio, Ollama, ds4, SGLang,
-   * EXL3, q27, TensorFold, FreeToken, Flare, or vLLM (default).
+   * EXL3, q27, TensorFold, Halogen, FreeToken, Flare, or vLLM (default).
    * @param {unknown} ownedBy
    * @param {boolean} [flareCard] `/v1/models` carried Flare's `flare` object (its
    *   `owned_by` is the generic "local", so the card shape is the signal)
-   * @returns {Promise<"lmstudio" | "ollama" | "ds4" | "sglang" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "flare" | "vllm">}
+   * @returns {Promise<"lmstudio" | "ollama" | "ds4" | "sglang" | "exl3" | "q27" | "tensorfold" | "halogen" | "freetoken" | "radiance" | "flare" | "vllm">}
    */
   async _classifyOpenAIBackend(ownedBy, flareCard = false) {
     // An owned_by that is exactly an engine's own name is classified from the card alone: detection
@@ -964,6 +984,11 @@ export class LlmProbe {
       const modelsRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelsRes.status);
       if (auth === "auth") {
+        if (this.backendType === "halogen") {
+          this._halogenBase = null;
+          this._halogenPrefillWindow = [];
+          return this._defaultLlm();
+        }
         return this._getSnapshot();
       }
       if (auth === "ok") {
@@ -998,7 +1023,8 @@ export class LlmProbe {
     if (flareCard && this.backendType !== "ds4") {
       this.backendType = "flare";
     } else if (typeof owned === "string") {
-      if (/ds4/i.test(owned)) this.backendType = "ds4";
+      if (/^halogen$/i.test(owned)) this.backendType = "halogen";
+      else if (/ds4/i.test(owned)) this.backendType = "ds4";
       else if (/sglang/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "sglang";
       } else if (/exl3/i.test(owned) && this.backendType !== "ds4") {
@@ -1012,6 +1038,25 @@ export class LlmProbe {
       } else if (/radiance/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "radiance";
       }
+    }
+
+    if (this.backendType === "halogen") {
+      // Both endpoints are read-only. Never send inference to manufacture telemetry.
+      this.engineVersion = null;
+      this._clearEngineMemory();
+      for (const path of ["/health", "/metrics"]) {
+        const res = await this._fetch(`${this.baseUrl}${path}`);
+        const auth = this._noteAuthStatus(res.status);
+        if (auth === "auth") {
+          this._halogenBase = null;
+          this._halogenPrefillWindow = [];
+          return this._defaultLlm();
+        }
+        if (!res.ok) throw new Error(`Halogen ${path} unreachable`);
+        if (path === "/health") this._applyHalogenHealth(await res.json());
+        else this._applyHalogenMetrics(await res.text(), dtSec);
+      }
+      return this._getSnapshot();
     }
 
     if (this.backendType === "strata") {
@@ -1870,6 +1915,117 @@ export class LlmProbe {
     const ctx = Number(stats.model?.ctx);
     if (Number.isFinite(ctx) && ctx > 0) this.contextLength = Math.round(ctx);
     if (stats.model?.id) applyModelRef(this, stats.model.id);
+  }
+
+  /** Halogen's primary GPU engine; the co-served NPU models have separate telemetry. */
+  _applyHalogenHealth(data) {
+    if (!data || data.status !== "ok" || typeof data.model !== "string" || !data.model.trim() || data.engine?.responds === false) {
+      throw new Error("Halogen engine is not ready");
+    }
+    const number = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+    const version = data.version?.engine;
+    this.engineVersion = typeof version === "string" && version.trim() ? version.trim() : null;
+    const modelContext = this.modelId === data.model ? this.contextLength : null;
+    this.modelId = data.model;
+    // Keep all served IDs for on-demand benches, but attribute counters and context
+    // to the GPU model named by /health, not whichever NPU model happens to sort first.
+    this.models = [data.model, ...this.models.filter((id) => id !== data.model)];
+    this.contextLength = number(data.slot_ctx) || number(data.context) || modelContext;
+    this.slotsTotal = number(data.slots) ?? 0;
+    this.requestsRunning = number(data.in_flight);
+    this.slotsActive = this.requestsRunning;
+    this.requestsWaiting = number(data.queued);
+    this.inFlightSeconds = number(data.busy_for_s);
+    this.gpuMemoryUtilization = null; // no sleep/residency measurement
+  }
+
+  /**
+   * Halogen v0.20 /metrics sums per-request timings at completion. These are NOT
+   * live counters: dividing a long request's tokens by the poll interval spikes.
+   * Decode uses delta tokens / delta engine seconds. Prefill sums computed tokens
+   * and engine seconds over the last minute's completed requests, like TensorFold.
+   * The window expires without a fresh completion, never counts cache hits, and
+   * clears on interruption/reset. Scrape-reset *_tokens_seconds gauges are not used.
+   */
+  _applyHalogenMetrics(txt, dtSec) {
+    const counter = (name) => {
+      const v = this._getPromMetric(txt, name);
+      return Number.isFinite(v) && v >= 0 ? v : null;
+    };
+    const now = {
+      out: counter("llamacpp:tokens_predicted_total"),
+      in: counter("llamacpp:prompt_tokens_total"),
+      decodeSec: counter("llamacpp:tokens_predicted_seconds_total"),
+      prefillSec: counter("llamacpp:prompt_seconds_total"),
+      cached: counter("halogen:prompt_tokens_cached_total"),
+      model: this.modelId,
+      version: this.engineVersion,
+    };
+    if ([now.out, now.in, now.decodeSec, now.prefillSec].some((v) => v == null)) {
+      throw new Error("Halogen metrics had no complete token/time counters");
+    }
+    if (counter("halogen:engine_up") === 0) throw new Error("Halogen engine is not ready");
+    const running = counter("llamacpp:requests_processing") ?? this.requestsRunning;
+    const waiting = counter("llamacpp:requests_deferred") ?? this.requestsWaiting;
+    const before = this._halogenBase;
+    let why = null;
+    if (this._seedNext || !before || !(dtSec > 0 && dtSec < 10)) why = "no recent Halogen counter baseline";
+    else if (now.model !== before.model || now.version !== before.version ||
+      ["out", "in", "decodeSec", "prefillSec", "cached"].some((key) => now[key] != null && before[key] != null && now[key] < before[key])) why = "Halogen engine counters restarted";
+    this._halogenBase = now;
+    this._seedNext = false;
+    this.generationTps = 0;
+    this.prefillTps = 0;
+    this.prefillTpsSource = null;
+    this.generationTpsSource = null;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
+    this.perStreamTps = null;
+    this.perStreamPrefillTps = null;
+    if (why) {
+      this._halogenPrefillWindow = [];
+      this._markUnmeasured(why, { reseed: false });
+    } else {
+      const at = Date.now();
+      const computed = now.in - before.in;
+      const seconds = now.prefillSec - before.prefillSec;
+      if (computed > 0 && seconds > 0) this._halogenPrefillWindow.push({ computed, seconds, at });
+      this._halogenPrefillWindow = this._halogenPrefillWindow.filter((w) => w.at > at - HALOGEN_PREFILL_WINDOW_MS);
+      const tokens = this._halogenPrefillWindow.reduce((sum, w) => sum + w.computed, 0);
+      const elapsed = this._halogenPrefillWindow.reduce((sum, w) => sum + w.seconds, 0);
+      // As in TensorFold, sub-50ms windows are too noisy to publish. Null source
+      // means no measurement, not zero speed; history/exporters honor the flag.
+      if (elapsed >= 0.05) {
+        this.prefillTps = Math.round(tokens / elapsed * 100) / 100;
+        this.prefillTpsSource = "completed-computed";
+      }
+      const decodeSeconds = now.decodeSec - before.decodeSec;
+      this.generationTps = decodeSeconds > 0 ? Math.round((now.out - before.out) / decodeSeconds * 100) / 100 : 0;
+      this.generationTpsSource = "completed";
+    }
+    this.totalOutputTokens = now.out;
+    this.totalCachedTokens = now.cached;
+    // prompt_n counts computed tokens only; the ledger wants the whole prompt.
+    this.totalPromptTokens = now.cached != null ? now.in + now.cached : null;
+    this.prefixCacheHitRate = this.totalPromptTokens > 0 ? now.cached / this.totalPromptTokens : null;
+    this.requestsRunning = running;
+    this.slotsActive = running;
+    this.requestsWaiting = waiting;
+    this.kvCacheUsage = counter("llamacpp:kv_cache_usage_ratio");
+    if (this.kvCacheUsage > 1) this.kvCacheUsage = null;
+    // Positions, not bytes or GPU RAM. Occupancy includes held warm conversations.
+    this.kvCacheTokens = counter("halogen:kv_pool_positions");
+    const used = counter("llamacpp:kv_cache_tokens");
+    this.kvCacheTokensAvailable = this.kvCacheTokens != null && used != null && used <= this.kvCacheTokens
+      ? this.kvCacheTokens - used : null;
+    const draft = counter("halogen:draft_tokens_total");
+    const accepted = counter("halogen:draft_tokens_accepted_total");
+    this.mtpAcceptanceRate = draft > 0 && accepted != null && accepted <= draft ? accepted / draft : null;
+    this.ttftSeconds = null;
+    this.ttftP95Seconds = null;
+    this.itlP95Seconds = null;
+    this.e2eP95Seconds = null;
+    this.preemptionsTotal = null;
   }
 
   _clearStrataRates() {
@@ -3651,19 +3807,20 @@ export class LlmProbe {
       modelId: this.models.length > 1 ? this.models[0] : this.modelId || null,
       modelPath: this.modelPath || null,
       /**
-       * Only vLLM and TensorFold report a version we read today; other backends stay null.
+       * Only vLLM, TensorFold and Halogen report a version we read today; other backends stay null.
        * A probe that is no longer measuring (the endpoint closed, or an API key was added so
        * authOpen is false) must not keep presenting the version it last read, for the same
        * reason `models` is cleared below.
        */
       engineVersion:
-        metricsLive && (this.backendType === "vllm" || this.backendType === "tensorfold")
+        metricsLive && (this.backendType === "vllm" || this.backendType === "tensorfold" || this.backendType === "halogen")
           ? this.engineVersion
           : null,
       models: metricsLive ? [...this.models] : [],
       // Strata advertises aliases for one loaded engine, sharing its native
-      // context limit. Genuine multi-model routers still have no shared limit.
-      contextLength: this.models.length > 1 && this.backendType !== "strata" ? null : this.contextLength,
+      // context limit. Halogen's counters/context belong to its primary GPU model.
+      // Genuine multi-model routers still have no shared limit.
+      contextLength: this.models.length > 1 && !["strata", "halogen"].includes(this.backendType) ? null : this.contextLength,
       gpuMemoryUtilization: this.gpuMemoryUtilization,
       slotsActive: this.slotsActive,
       slotsTotal: this.slotsTotal,
@@ -3671,6 +3828,8 @@ export class LlmProbe {
       perStreamTps: this.perStreamTps,
       perStreamPrefillTps: this.perStreamPrefillTps,
       prefillTpsSource: this.prefillTpsSource,
+      prefillMeasurementValid: this.backendType !== "halogen" || this.prefillTpsSource === "completed-computed",
+      prefillMeasuredAt: this.backendType === "halogen" ? this._halogenPrefillWindow.at(-1)?.at ?? null : null,
       prefillTps: this.prefillTps,
       decodeActive: this.decodeActive === true,
       generationTpsSource: this.generationTpsSource,
@@ -3720,6 +3879,8 @@ export class LlmProbe {
       perStreamTps: null,
       perStreamPrefillTps: null,
       prefillTpsSource: null,
+      prefillMeasurementValid: false,
+      prefillMeasuredAt: null,
       prefillTps: 0,
       decodeActive: false,
       generationTpsSource: null,

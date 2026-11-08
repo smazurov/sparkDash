@@ -341,6 +341,28 @@ test("retention: 1-minute buckets leave after 48 h, 15-minute buckets after 30 d
   assert.deepEqual(s.query("a", "30d", T0 + 31 * DAY).points.map((p) => p.gpuUtil.avg), [20, 30]);
 });
 
+test("Halogen prefill gaps survive aggregation and persisted history reload", async (t) => {
+  const tiersFile = path.join(tmpDir(t), "metrics-history.json");
+  const s = store({ tiersFile });
+  const snapshot = gb10Snapshot({ llmPorts: [8731] });
+  snapshot.metrics.llm = [{ available: true, measurementValid: true, backend: "halogen",
+    prefillMeasurementValid: false, generationTps: 0, prefillTps: 0, kvCacheUsage: 0.5 }];
+  const record = (at) => rec(s, T0 + at, extractSample(snapshot), { llmPorts: [8731] });
+  record(0);
+  Object.assign(snapshot.metrics.llm[0], { prefillMeasurementValid: true, prefillTps: 1613.77 });
+  record(2000);
+  record(4000); // held reading, not a completion spike
+  Object.assign(snapshot.metrics.llm[0], { prefillMeasurementValid: false, prefillTps: 0 });
+  record(62000);
+  record(120000);
+  await s.save();
+  const loaded = store({ tiersFile, at: T0 + 120000 });
+  const points = loaded.query("a", "6h", T0 + 120000).llm[0].points;
+  // Persisted throughput tiers round to whole tok/s; missing samples remain absent.
+  assert.deepEqual(points.map((p) => p.prefillTps ?? null), [{ avg: 1614, max: 1614 }, null, null]);
+  assert.ok(points.every((p) => p.kvUsage.avg === 0.5), "other valid series continue through the prefill gap");
+});
+
 test("save() round-trips the tiers asynchronously, open buckets included, mode 0600", async (t) => {
   const tiersFile = path.join(tmpDir(t), "metrics-history.json");
   const a = store({ tiersFile });

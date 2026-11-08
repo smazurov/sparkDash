@@ -57,6 +57,23 @@ describe("metricsStore timestamp contract", () => {
     expect(getMetricHistorySamples(spark.id, "gpu.powerPct")).toEqual([]);
   });
 
+  it("records a held Halogen prefill window but no zero before measurement or after expiry", () => {
+    const spark = makeSpark();
+    spark.llmPorts = [8731];
+    Object.assign(spark.metrics.llm[0], { backend: "halogen", available: true, measurementValid: true,
+      generationTps: 0, prefillTps: 0, prefillMeasurementValid: false });
+    ingestSnapshots([spark], 1_000);
+    Object.assign(spark.metrics.llm[0], { prefillTps: 1613.77, prefillMeasurementValid: true });
+    ingestSnapshots([spark], 3_000);
+    ingestSnapshots([spark], 5_000);
+    Object.assign(spark.metrics.llm[0], { prefillTps: 0, prefillMeasurementValid: false });
+    ingestSnapshots([spark], 65_000);
+    expect(getMetricHistorySamples(spark.id, "llm:8731.prefill")).toEqual([
+      { at: 3_000, value: 1613.77 }, { at: 5_000, value: 1613.77 },
+    ]);
+    expect(getMetricHistorySamples(spark.id, "llm:8731.tps")).toHaveLength(4);
+  });
+
   it("leaves a gap, not a zero, for an LLM poll whose stats could not be read", () => {
     const spark = makeSpark();
     spark.llmPorts = [8888];

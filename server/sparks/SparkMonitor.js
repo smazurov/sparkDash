@@ -551,8 +551,16 @@ export class SparkMonitor {
       if (port == null || !entry || typeof entry !== "object") return entry;
       ports.add(port);
       const gen = Number(entry.generationTps);
-      const pre = Number(entry.prefillTps);
+      // Halogen holds a completed prefill window. Its observation time, not each
+      // display refresh, stamps last served; a retained rate is not ongoing work.
+      const completedPrefill = entry.backend === "halogen";
+      const pre = completedPrefill ? 0 : Number(entry.prefillTps);
+      const observed = entry.prefillMeasuredAt;
+      if (entry.available && completedPrefill && Number.isFinite(observed) && observed <= now &&
+        observed > (this._llmLastActiveAt.get(port) ?? 0)) this._llmLastActiveAt.set(port, observed);
+      const running = Number(entry.requestsRunning);
       if (entry.available && (entry.decodeActive === true || entry.prefillActive === true ||
+        (Number.isFinite(running) && running > 0) ||
         (Number.isFinite(gen) && gen > 0) || (Number.isFinite(pre) && pre > 0))) {
         this._llmLastActiveAt.set(port, now);
       }
