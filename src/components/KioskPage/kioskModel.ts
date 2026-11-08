@@ -220,9 +220,9 @@ export function kioskCard(
   if (role !== "worker" && llm) {
     const ok = llm.measurementValid !== false;
     rates = {
-      decode: ok ? llm.generationTps.toFixed(1) : "—",
+      decode: ok && llm.generationMeasurementValid !== false ? llm.generationTps.toFixed(1) : "—",
       prefill: !ok || llm.prefillMeasurementValid === false ? "—" : llm.prefillActive && llm.prefillTps <= 0 ? tr("kiosk.prefilling") : Math.round(llm.prefillTps).toLocaleString(),
-      decodeLive: ok && llm.generationTps > 0,
+      decodeLive: ok && llm.generationMeasurementValid !== false && llm.generationTpsSource !== "completed" && llm.generationTps > 0,
     };
   }
 

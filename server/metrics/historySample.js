@@ -147,7 +147,7 @@ export function extractSample(snapshot, isFresh = () => true) {
       if (!Number.isInteger(port) || !ports.includes(port) || entry?.available !== true) return;
       // The endpoint answered but its stats could not be read: a gap, not a zero rate.
       if (entry.measurementValid === false) return;
-      set(llmKey(port, "genTps"), entry.generationTps);
+      if (entry.generationMeasurementValid !== false) set(llmKey(port, "genTps"), entry.generationTps);
       if (entry.prefillMeasurementValid !== false) set(llmKey(port, "prefillTps"), entry.prefillTps);
       if (finite(entry.kvCacheUsage)) {
         set(llmKey(port, "kvUsage"), Math.min(1, Math.max(0, entry.kvCacheUsage)));

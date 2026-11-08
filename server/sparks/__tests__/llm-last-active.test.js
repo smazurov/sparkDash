@@ -65,6 +65,22 @@ test("a held Halogen prefill rate does not extend last-served time", (t) => {
   assert.equal(poll(90000), clock); // old completed sample cannot move it backwards
 });
 
+test("held Halogen decode uses its observation time, including decode-only completions", (t) => {
+  let clock = 100000;
+  t.mock.method(Date, "now", () => clock);
+  const monitor = new SparkMonitor(spark([8731]));
+  const poll = (generationMeasuredAt, prefillMeasuredAt = null, requestsRunning = 0) => monitor._stampLlmLastActive([{ port: 8731 }], [
+    { ...sample(60, 1000), backend: "halogen", generationMeasuredAt, prefillMeasuredAt, requestsRunning },
+  ])[0].lastActiveAt;
+  assert.equal(poll(null), null); // numeric held values alone are not live work
+  assert.equal(poll(90000, 80000), 90000);
+  clock += 20000;
+  assert.equal(poll(90000, 80000), 90000);
+  assert.equal(poll(110000), 110000); // new decode-only completion
+  assert.equal(poll(null), 110000); // expiry does not erase last served
+  assert.equal(poll(110000, null, 1), clock);
+});
+
 /** Monitor whose probes return whatever `rates` holds for their port. */
 function scriptedMonitor(t, ports) {
   t.mock.method(llmDaily, "record", () => {});

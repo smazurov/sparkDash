@@ -341,8 +341,10 @@ function addLlm(samples, base, snapshot) {
     // Reachable but unmeasured (its stats could not be read): flag it and export no rates or counters.
     samples.add("sparkdash_llm_measurement_valid", labels, entry.measurementValid === false ? 0 : 1);
     if (entry.measurementValid === false) return;
-    samples.add("sparkdash_llm_generation_tokens_per_second", labels, entry.generationTps);
-    samples.add("sparkdash_llm_per_stream_tokens_per_second", labels, entry.perStreamTps);
+    if (entry.generationMeasurementValid !== false) {
+      samples.add("sparkdash_llm_generation_tokens_per_second", labels, entry.generationTps);
+      samples.add("sparkdash_llm_per_stream_tokens_per_second", labels, entry.perStreamTps);
+    }
     if (entry.prefillMeasurementValid !== false) {
       samples.add("sparkdash_llm_per_stream_prefill_tokens_per_second", labels, entry.perStreamPrefillTps);
       samples.add("sparkdash_llm_prefill_tokens_per_second", labels, entry.prefillTps);
@@ -575,7 +577,7 @@ export function unitMetricJson(entry) {
       llm.push(e);
       return;
     }
-    if (finite(ll.generationTps)) e.generation_tokens_per_second = ll.generationTps;
+    if (ll.generationMeasurementValid !== false && finite(ll.generationTps)) e.generation_tokens_per_second = ll.generationTps;
     if (ll.prefillMeasurementValid !== false && finite(ll.prefillTps)) e.prefill_tokens_per_second = ll.prefillTps;
     if (finite(ll.kvCacheUsage)) e.kv_cache_usage_ratio = ll.kvCacheUsage;
     if (finite(ll.requestsRunning)) e.requests_running = ll.requestsRunning;

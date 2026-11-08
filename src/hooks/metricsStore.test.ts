@@ -74,6 +74,23 @@ describe("metricsStore timestamp contract", () => {
     expect(getMetricHistorySamples(spark.id, "llm:8731.tps")).toHaveLength(4);
   });
 
+  it("records a completed decode window without fake zeroes before measurement or after expiry", () => {
+    const spark = makeSpark();
+    spark.llmPorts = [8731];
+    Object.assign(spark.metrics.llm[0], { backend: "halogen", measurementValid: true,
+      generationMeasurementValid: false, generationTps: 0 });
+    ingestSnapshots([spark], 1000);
+    Object.assign(spark.metrics.llm[0], { generationMeasurementValid: true, generationTps: 62.7 });
+    ingestSnapshots([spark], 3000);
+    ingestSnapshots([spark], 5000);
+    Object.assign(spark.metrics.llm[0], { generationMeasurementValid: false, generationTps: 0 });
+    ingestSnapshots([spark], 65000);
+    expect(getMetricHistorySamples(spark.id, "llm:8731.tps")).toEqual([
+      { at: 3000, value: 62.7 }, { at: 5000, value: 62.7 },
+    ]);
+    expect(getMetricHistorySamples(spark.id, "llm:8731.prefill")).toHaveLength(4);
+  });
+
   it("leaves a gap, not a zero, for an LLM poll whose stats could not be read", () => {
     const spark = makeSpark();
     spark.llmPorts = [8888];

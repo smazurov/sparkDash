@@ -34,6 +34,14 @@ describe("fleetStats", () => {
     expect(t.decodeTps).toBe(40);
   });
 
+  it("excludes completed windows from live fleet totals and preserves unavailable vs measured zero", () => {
+    const completed = { available: true, generationTps: 62.7, generationTpsSource: "completed" };
+    const unknown = { available: true, generationTps: 0, generationMeasurementValid: false };
+    expect(computeFleetTotals([spark({ metrics: { llm: [completed, unknown] } })]).decodeTps).toBeNull();
+    expect(computeFleetTotals([spark({ metrics: { llm: [completed, { available: true, generationTps: 0 }] } })]).decodeTps).toBe(0);
+    expect(computeFleetTotals([spark({ metrics: { llm: [completed, { available: true, generationTps: 40 }] } })]).decodeTps).toBe(40);
+  });
+
   it("rolls a fixed window", () => {
     let b: number[] = [];
     for (let i = 0; i < 5; i++) b = pushRolling(b, i, 3);
