@@ -6,7 +6,7 @@
  */
 import { collectionWasSuccessful } from "../collectors/SystemCollector.js";
 import { deviceReadings } from "./UnitHistory.js";
-import { extractSample, unsupportedGenerationPorts } from "./historySample.js";
+import { extractSample, halogenPorts } from "./historySample.js";
 import { HISTORY_RANGES } from "./historyTiers.js";
 
 /** One sample per collector poll at the default 2 s cadence. */
@@ -91,10 +91,11 @@ export function createUnitHistoryHandler({ store, hasUnit, isEnabled, getSnapsho
     }
     if (!isEnabled()) return res.json({ enabled: false });
     const data = store.query(id, range, now());
-    const unsupported = unsupportedGenerationPorts(getSnapshot(id));
-    const llm = data.llm.map((entry) => unsupported.has(entry.port)
-      ? { ...entry, points: entry.points.map(({ genTps: _invalid, ...point }) => point) }
-      : entry);
+    const halogen = halogenPorts(getSnapshot(id));
+    const llm = data.llm.map((entry) => ({ ...entry, points: entry.points.map(({ genTps, genTpsWall, ...point }) => {
+      const decode = halogen.has(entry.port) ? genTpsWall : genTps;
+      return decode ? { ...point, genTps: decode } : point;
+    }) }));
     return res.json({ enabled: true, ...data, llm });
   };
 }

@@ -128,7 +128,7 @@ export interface KioskCard {
   /** Free space on the root disk (MB), the disk the Overview card reports. */
   diskFreeMb: number | null;
   /** Live rates of the unit's first answering endpoint, as the Overview shows them; null without one. */
-  rates: { decode: string; prefill: string; decodeLive: boolean } | null;
+  rates: { decode: string; prefill: string; decodeLive: boolean; decodeLabel: string } | null;
   /** For a worker: the head it serves (shown in its role badge), or null when none is set. */
   workerOf: { name: string } | null;
   /** Model row: the served model (a worker's head's), or the reason there is none. */
@@ -140,6 +140,7 @@ export type KioskLabels = (key: string, values?: Record<string, unknown>) => str
 /** Pure-model callers do not mount i18n; preserve the historic English contract. */
 const defaultKioskLabels: KioskLabels = (key, values) => {
   const copy: Record<string, string> = {
+    "kiosk.decode": "Decode", "card.decodeCounterWindow": "Decode · total · 60s",
     "kiosk.model": "Model", "kiosk.system": "System", "kiosk.other": "Other", "kiosk.gpu": "GPU",
     "kiosk.unifiedMemory": "Unified memory", "kiosk.vram": "VRAM", "kiosk.inUse": "In use",
     "kiosk.headOffline": "Head offline", "kiosk.headApiNotReady": "Head API not ready", "kiosk.noHeadPort": "No LLM port watched on the head",
@@ -222,7 +223,8 @@ export function kioskCard(
     rates = {
       decode: ok && llm.generationMeasurementValid !== false ? llm.generationTps.toFixed(1) : "—",
       prefill: !ok || llm.prefillMeasurementValid === false ? "—" : llm.prefillActive && llm.prefillTps <= 0 ? tr("kiosk.prefilling") : Math.round(llm.prefillTps).toLocaleString(),
-      decodeLive: ok && llm.generationMeasurementValid !== false && llm.generationTpsSource !== "completed" && llm.generationTps > 0,
+      decodeLabel: tr(llm.backend === "halogen" ? "card.decodeCounterWindow" : "kiosk.decode"),
+      decodeLive: ok && llm.generationMeasurementValid !== false && llm.generationTpsSource !== "completed" && llm.generationTpsSource !== "completed-window" && llm.generationTps > 0,
     };
   }
 

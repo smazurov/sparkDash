@@ -62,7 +62,17 @@ describe("kioskCard", () => {
     expect(kioskCard(s, null, null).rates?.prefill).toBe("1,000");
   });
 
-  it("keeps unsupported aggregate decode unavailable even with a stale numeric value", () => {
+  it("labels a completed wall-window aggregate without a live indicator", () => {
+    const s = makeSpark("halogen");
+    Object.assign(s.metrics.llm[0], { backend: "halogen", measurementValid: true,
+      generationMeasurementValid: true, generationTps: 133.33, generationTpsSource: "completed-window" });
+    const rates = kioskCard(s, null, null).rates;
+    expect(rates?.decode).toBe("133.3");
+    expect(rates?.decodeLabel).toBe("Decode · total · 60s");
+    expect(rates?.decodeLive).toBe(false);
+  });
+
+  it("keeps unmeasured aggregate decode unavailable even with a stale numeric value", () => {
     const s = makeSpark("halogen");
     Object.assign(s.metrics.llm[0], { backend: "halogen", measurementValid: true,
       generationMeasurementValid: false, generationTps: 0, generationTpsSource: null });
@@ -101,7 +111,7 @@ describe("kioskCard", () => {
   it("shows an unmeasured rate as unknown, not as 0", () => {
     const s = makeSpark("a");
     s.metrics.llm[0].measurementValid = false;
-    expect(kioskCard(s, null, null).rates).toEqual({ decode: "—", prefill: "—", decodeLive: false });
+    expect(kioskCard(s, null, null).rates).toEqual({ decode: "—", prefill: "—", decodeLive: false, decodeLabel: "Decode" });
   });
 
   it("gives a worker its live head's model, and says why when the head has none", () => {

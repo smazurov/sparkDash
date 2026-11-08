@@ -19,16 +19,26 @@ function halogen(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Halogen monitoring", () => {
+  it.each([133.33, 0])("reports aggregate window throughput %s without claiming live decode", (rate) => {
+    const { container } = render(<LlmPanel llm={halogen({ generationTps: rate,
+      generationMeasurementValid: true, generationTpsSource: "completed-window",
+      requestsRunning: 0, requestsWaiting: 0, slotsActive: 0 })} sparkId="fixture" llmPort={8731} />);
+    expect(container.textContent).toContain("Decode · total · 60s");
+    expect(container.textContent).toContain("Completion-delayed");
+    expect([...container.querySelectorAll(".sp-big-lg")][0].textContent).toContain(rate.toFixed(1));
+    expect(container.querySelector("[data-llm-idle]")?.textContent).toMatch(/^Idle/);
+    expect(container.textContent).not.toContain("Collecting 60s window");
+  });
   it("shows GPU telemetry and prefill without substituting a mean for aggregate decode", () => {
     const { container } = render(<LlmPanel llm={halogen()} sparkId="fixture" llmPort={8731} />);
     expect(container.textContent).toContain("Halogen · :8731 · v0.20.0");
-    expect(container.textContent).toContain("Decode · aggregate");
+    expect(container.textContent).toContain("Decode · total · 60s");
     expect(container.textContent).toContain("Prefill · last 60s");
     expect(container.textContent).toContain("Computed tokens only");
     expect(container.textContent).toContain("NPU activity is not included");
     expect(container.textContent).not.toContain("includes cached tokens");
     expect([...container.querySelectorAll(".sp-big-lg")][0].textContent).toBe("—");
-    expect(container.textContent).toContain("Aggregate decode is unavailable");
+    expect(container.textContent).toContain("Collecting 60s window");
     expect(container.textContent).not.toContain("Decode · last 60s");
     expect(container.textContent).toContain("1,000");
     expect(container.textContent).toContain("2 / 4");

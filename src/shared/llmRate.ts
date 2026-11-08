@@ -7,6 +7,6 @@ import type { LlmMetrics } from "../api/types";
  */
 export function measuredGenerationTps(llm: Pick<LlmMetrics, "generationTps" | "measurementValid" | "generationMeasurementValid" | "generationTpsSource"> | null | undefined): number | null {
   if (!llm || llm.measurementValid === false || llm.generationMeasurementValid === false ||
-    llm.generationTpsSource === "completed" || !Number.isFinite(llm.generationTps)) return null;
+    (llm.generationTpsSource === "completed" || llm.generationTpsSource === "completed-window") || !Number.isFinite(llm.generationTps)) return null;
   return llm.generationTps;
 }

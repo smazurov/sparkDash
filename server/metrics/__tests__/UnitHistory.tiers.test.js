@@ -65,6 +65,29 @@ function gb10Snapshot(overrides = {}) {
   };
 }
 
+test("corrected Halogen history survives disk reload and coarsening without mixing legacy means", (t) => {
+  const dir = tmpDir(t);
+  const tiersFile = path.join(dir, "tiers.json");
+  const s = store({ tiersFile });
+  rec(s, T0, { [llmKey(8731, "genTps")]: 25.24 }, { llmPorts: [8731] });
+  for (const [offset, rate] of [[30_000, 133.33], [45_000, 111.11]]) {
+    const sample = extractSample(gb10Snapshot({ llmPorts: [8731], metrics: { llm: [{
+      backend: "halogen", available: true, generationMeasurementValid: true,
+      generationTpsSource: "completed-window", generationTps: rate,
+    }] } }));
+    assert.equal(sample[llmKey(8731, "genTps")], undefined);
+    assert.equal(sample[llmKey(8731, "genTpsWall")], rate);
+    rec(s, T0 + offset, sample, { llmPorts: [8731] });
+  }
+  s.flush();
+  const restored = store({ tiersFile, at: T0 + MINUTE });
+  for (const range of ["1h", "24h", "30d"]) {
+    const point = restored.query("a", range, T0 + MINUTE).llm[0].points[0];
+    assert.deepEqual(point.genTps, { avg: 25.24, max: 25.24 });
+    assert.deepEqual(point.genTpsWall, { avg: 122, max: 133 }); // existing transport rounding above 100
+  }
+});
+
 test("extractSample reads every series from a GB10 snapshot", () => {
   assert.deepEqual(extractSample(gb10Snapshot()), {
     gpuUtil: 87,

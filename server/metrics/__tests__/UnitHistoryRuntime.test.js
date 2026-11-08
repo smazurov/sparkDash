@@ -233,7 +233,8 @@ test("routes: GPU history unchanged, history validates the range and reports the
 
 test("history excludes legacy Halogen request means without altering storage, prefill, KV or other ports", async (t) => {
   const data = { points: [], llm: [
-    { port: 8731, points: [{ t: T0, genTps: { avg: 25.24, max: 25.24 }, prefillTps: { avg: 1000, max: 1000 }, kvUsage: { avg: 0.5, max: 0.5 } }] },
+    { port: 8731, points: [{ t: T0, genTps: { avg: 25.24, max: 25.24 }, prefillTps: { avg: 1000, max: 1000 }, kvUsage: { avg: 0.5, max: 0.5 } },
+      { t: T0 + 60_000, genTps: { avg: 25.24, max: 25.24 }, genTpsWall: { avg: 133.33, max: 133.33 } }] },
     { port: 8888, points: [{ t: T0, genTps: { avg: 95, max: 95 } }] },
   ] };
   const snapshot = { llmPorts: [8888, 8731], metrics: { llm: [
@@ -249,6 +250,8 @@ test("history excludes legacy Halogen request means without altering storage, pr
     `http://127.0.0.1:${server.address().port}/api/sparks/a/history?range=1h`
   )).json();
   assert.equal(res.llm[0].points[0].genTps, undefined);
+  assert.equal(res.llm[0].points[1].genTps.avg, 133.33);
+  assert.equal(res.llm[0].points[1].genTpsWall, undefined, "internal provenance is not a fourth UI series");
   assert.equal(res.llm[0].points[0].prefillTps.avg, 1000);
   assert.equal(res.llm[0].points[0].kvUsage.avg, 0.5);
   assert.equal(res.llm[1].points[0].genTps.avg, 95);
