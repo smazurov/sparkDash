@@ -185,7 +185,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
         // An unreadable poll is a gap in the trend, not a dip to zero.
         if (llm.measurementValid !== false) {
           pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps, at);
-          pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps, at);
+          if (llm.prefillMeasurementValid !== false) pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps, at);
         }
         // TTFT is sparse: vLLM reports live TTFT only while serving. It is NOT
         // index-aligned with the tick-dense series above — that is fine because
@@ -194,10 +194,10 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
         if (llm.ttftSeconds != null) {
           pushHistory(`${s.id}:llm${portKey}.ttft`, llm.ttftSeconds, at);
         }
-        if (llm.cachedPrefillTps != null) {
+        if (llm.prefillMeasurementValid !== false && llm.cachedPrefillTps != null) {
           pushHistory(`${s.id}:llm${portKey}.prefillCached`, llm.cachedPrefillTps, at);
         }
-        if (llm.uncachedPrefillTps != null) {
+        if (llm.prefillMeasurementValid !== false && llm.uncachedPrefillTps != null) {
           pushHistory(`${s.id}:llm${portKey}.prefillUncached`, llm.uncachedPrefillTps, at);
         }
       }

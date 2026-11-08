@@ -48,6 +48,23 @@ test("Halogen load stamps activity without inventing a decode or prefill phase",
   assert.equal(poll(2), 12345);
 });
 
+test("a held Halogen prefill rate does not extend last-served time", (t) => {
+  let clock = 100000;
+  t.mock.method(Date, "now", () => clock);
+  const monitor = new SparkMonitor(spark([8731]));
+  const poll = (prefillMeasuredAt, requestsRunning = 0, available = true) => monitor._stampLlmLastActive([{ port: 8731 }], [
+    { ...sample(0, 1500), backend: "halogen", prefillMeasuredAt, requestsRunning, available },
+  ])[0].lastActiveAt;
+  assert.equal(poll(90000, 0, false), null);
+  assert.equal(poll(110000), null); // no future observation
+  assert.equal(poll(90000), 90000);
+  clock += 20000;
+  assert.equal(poll(90000), 90000); // still displayed, not new activity
+  assert.equal(poll(null), 90000); // expired
+  assert.equal(poll(90000, 1), clock); // actual in-flight work does count
+  assert.equal(poll(90000), clock); // old completed sample cannot move it backwards
+});
+
 /** Monitor whose probes return whatever `rates` holds for their port. */
 function scriptedMonitor(t, ports) {
   t.mock.method(llmDaily, "record", () => {});

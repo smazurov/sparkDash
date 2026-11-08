@@ -1,6 +1,7 @@
 import { formatSince } from "./formatSince";
 
 interface LlmRates {
+  backend?: string | null;
   generationTps: number;
   prefillTps: number;
   /** A prompt is mid-prefill (engines that publish counters only when a request finishes). */
@@ -21,6 +22,9 @@ const serving = (tps: number) => Number.isFinite(tps) && tps > 0;
 export function isLlmIdle(llm: LlmRates): boolean {
   if (llm.prefillActive === true || llm.decodeActive === true) return false;
   if (serving(llm.requestsRunning ?? 0) || serving(llm.requestsWaiting ?? 0)) return false;
+  // Halogen rates describe completed work, not the current phase. Require known
+  // empty load before saying idle; a held prefill rate does not keep it busy.
+  if (llm.backend === "halogen") return llm.requestsRunning === 0 && llm.requestsWaiting === 0;
   return !serving(llm.generationTps) && !serving(llm.prefillTps);
 }
 

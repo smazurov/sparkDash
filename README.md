@@ -725,12 +725,16 @@ is needed; all monitoring is read-only HTTP. An optional API key uses the existi
 
 The adapter follows Halogen's [v0.20.0 observability contract](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/docs/codex.md#observability):
 
-- **Decode · completed / Prefill · completed** divide changes in completed token counters by
-  changes in the engine's decode/prefill seconds, **not the polling interval**. They are means over
-  requests completed between successful polls, not live throughput or aggregate concurrency.
-  Prefill counts **computed tokens only**, excluding cache hits. No new completion shows **—**;
-  startup, restart, failed reads and long polling gaps re-seed without a lifetime-counter spike.
-  Sticky `*_tokens_seconds` gauges are not used. On-demand benches still measure streaming speed.
+- **Decode · completed** divides changes in completed output tokens by changes in decode seconds,
+  **not the polling interval**. **Prefill · last 60s** follows TensorFold's completed-window
+  convention: sum the **computed tokens only** and engine prefill seconds from completions observed
+  in the last 60 seconds, then divide those sums. It stays visible between completions without
+  pretending to be live throughput, excludes cache hits, and expires to **—**. Windows with less
+  than 50 ms of measured work are not published. Startup, restart, failed reads and polling gaps
+  re-seed and discard the old window; no lifetime-counter spike or measurement from a prior model.
+  `prefillMeasurementValid: false` leaves a gap in history and omits the exported rate rather than
+  recording a fabricated zero. `prefillMeasuredAt` keeps a retained rate from extending last-served
+  time or marking an idle engine busy. Scrape-reset `*_tokens_seconds` gauges are not used.
 - **Token totals**: `llamacpp:tokens_predicted_total` is generated output;
   `llamacpp:prompt_tokens_total` is computed input. Adding `halogen:prompt_tokens_cached_total`
   gives the full prompt total for the ledger. Cache hit ratio is cached / full prompt.
@@ -743,6 +747,27 @@ The adapter follows Halogen's [v0.20.0 observability contract](https://github.co
 - **Scope is the primary GPU model**, named by `/health`, even when `/v1/models` also lists NPU
   models. The NPU queue, tokens and rates are not folded into GPU telemetry. All served model IDs
   remain available for on-demand requests. The engine version comes from `/health.version.engine`.
+
+#### What Halogen reports live
+
+Reviewed through the GitHub CLI against upstream **v0.20.0 / `8242b15`**:
+
+- [0.11.0](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/CHANGELOG.md#0110)
+  added **engine-log progress**: `flash_serve: req N prefill P/T tokens, S s`, at 32,768-token
+  chunk boundaries and every 20 seconds inside a chunk; generation progress every 30 seconds.
+- [0.17.5](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/CHANGELOG.md#0175)
+  added opt-in **request-stream progress**: `return_progress: true` yields `prompt_progress`
+  events (`total`, `cache`, `processed`, `time_ms`) before the first generated token.
+- The current [server-state routes](https://github.com/peonist-ai/halogen-flash-server/blob/v0.20.0/docs/api.md#server-state-routes)
+  still expose completed token/time totals, not per-request live prefill progress. `/slots` is
+  capacity-only; `/cache` can return its last report with an age while prefill is running.
+
+A live 0.20.0 test of 11,820 uncached tokens produced 15 SSE progress events and reported
+7.2484 seconds of prefill (1,630.7 tok/s). The polled token/time counters stayed flat until
+completion. The monitoring adapter therefore remains read-only HTTP and uses the completed
+window; it neither starts inference to manufacture telemetry nor tails engine logs with extra
+host/container privileges. Live SSE progress is available to the requesting client, not to an
+independent fleet-wide poller.
 
 ### Decode / prefill tok/s on engines without counters
 

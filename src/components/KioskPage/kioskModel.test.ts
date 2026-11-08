@@ -53,6 +53,15 @@ describe("kioskCard", () => {
     expect(c.memory?.ram).toBeNull();
   });
 
+  it("shows an unmeasured Halogen prefill as unavailable, not zero", () => {
+    const s = makeSpark("halogen");
+    Object.assign(s.metrics.llm[0], { backend: "halogen", available: true, measurementValid: true,
+      prefillMeasurementValid: false, prefillTps: 0 });
+    expect(kioskCard(s, null, null).rates?.prefill).toBe("—");
+    Object.assign(s.metrics.llm[0], { prefillMeasurementValid: true, prefillTps: 1000 });
+    expect(kioskCard(s, null, null).rates?.prefill).toBe("1,000");
+  });
+
   it("adds system RAM on a host with a discrete card", () => {
     const s = makeSpark("h");
     s.kind = "host";

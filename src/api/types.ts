@@ -511,6 +511,10 @@ export interface LlmMetrics {
   /** Live throughput or a completed-request window; Halogen completed-computed excludes cache hits. */
   prefillTpsSource?: "live" | "completed-effective" | "completed-split" | "completed-computed" | null;
   prefillTps: number;
+  /** False when prefill has no usable measurement (e.g. an expired completed window); not a zero rate. */
+  prefillMeasurementValid?: boolean;
+  /** Last completed prefill observation, epoch ms (Halogen); holding the rate does not update this. */
+  prefillMeasuredAt?: number | null;
   /** A prompt is being processed right now. With no live rate available (TensorFold reports totals only for finished requests) the UI says "prefilling" instead of 0. */
   prefillActive?: boolean;
   /** A request is generating right now, even when the backend has no live rate. */

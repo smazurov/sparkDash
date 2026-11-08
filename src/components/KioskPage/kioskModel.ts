@@ -221,7 +221,7 @@ export function kioskCard(
     const ok = llm.measurementValid !== false;
     rates = {
       decode: ok ? llm.generationTps.toFixed(1) : "—",
-      prefill: !ok ? "—" : llm.prefillActive && llm.prefillTps <= 0 ? tr("kiosk.prefilling") : Math.round(llm.prefillTps).toLocaleString(),
+      prefill: !ok || llm.prefillMeasurementValid === false ? "—" : llm.prefillActive && llm.prefillTps <= 0 ? tr("kiosk.prefilling") : Math.round(llm.prefillTps).toLocaleString(),
       decodeLive: ok && llm.generationTps > 0,
     };
   }

@@ -451,8 +451,7 @@ export function LlmPanel({
   const measured = llm?.measurementValid !== false;
   // While nothing is flowing, say when the endpoint last served.
   const idleSince = formatSince(llm?.lastActiveAt);
-  const idle = llm != null && isLlmIdle(llm) &&
-    (!isHalogen || (llm.requestsRunning === 0 && llm.requestsWaiting === 0));
+  const idle = llm != null && isLlmIdle(llm);
   const idleNote = available && measured && idle
     ? idleSince ? t("llm.idleLastServed", { age: idleSince }) : t("llm.idle")
     : null;
@@ -849,9 +848,9 @@ export function LlmPanel({
                     : t("llm.prefillHelp")
               }
             >
-              <span className="eyebrow">{completedPrefill || isHalogen ? t("llm.prefillCompleted") : t("llm.prefill")}</span>
+              <span className="eyebrow">{isHalogen ? t("llm.prefillRecent") : completedPrefill ? t("llm.prefillCompleted") : t("llm.prefill")}</span>
               <div className="big-num sp-big-lg">
-                {!measured || (isHalogen && prefillTps <= 0) ? (
+                {!measured || llm?.prefillMeasurementValid === false || (isHalogen && prefillTps <= 0) ? (
                   <span title={llm?.measurementError ?? undefined}>—</span>
                 ) : llm?.prefillActive && prefillTps <= 0 ? (
                   <>

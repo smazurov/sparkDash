@@ -19,7 +19,7 @@ describe("Halogen overview", () => {
     const { container } = render(<SparkCard spark={halogen()} temperatureUnit="celsius" />);
     expect(container.querySelector('[title*="Halogen"]')).not.toBeNull();
     expect(container.textContent).toContain("Decode · completed");
-    expect(container.textContent).toContain("Prefill · completed");
+    expect(container.textContent).toContain("Prefill · last 60s");
     expect(container.textContent).toContain("Computed tokens only");
     expect(container.textContent).not.toContain("incl. cached tokens");
     expect(container.textContent).toContain("256k ctx");

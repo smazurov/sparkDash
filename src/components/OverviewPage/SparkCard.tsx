@@ -528,8 +528,8 @@ function SparkCardImpl({
                     : undefined
                 }
               >
-                <div className="eyebrow">{completedPrefill || isHalogen ? t("card.prefillCompleted") : t("card.prefill")}</div>
-                {llm.measurementValid === false || (isHalogen && llm.prefillTps <= 0) ? (
+                <div className="eyebrow">{isHalogen ? t("card.prefillRecent") : completedPrefill ? t("card.prefillCompleted") : t("card.prefill")}</div>
+                {llm.measurementValid === false || llm.prefillMeasurementValid === false || (isHalogen && llm.prefillTps <= 0) ? (
                   <div className="big-num ov-tps__num" title={llm.measurementError ?? (isHalogen ? t("card.halogenRatesHelp") : t("card.statsCouldNotBeRead"))}>—</div>
                 ) : llm.prefillActive && llm.prefillTps <= 0 ? (
                   <div className="big-num ov-tps__num ov-tps__num--live" title={isStrata ? t("card.prefillProcessingStrata") : t("card.prefillProcessing")}>

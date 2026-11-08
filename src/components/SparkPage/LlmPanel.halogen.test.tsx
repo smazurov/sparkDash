@@ -23,7 +23,7 @@ describe("Halogen monitoring", () => {
     const { container } = render(<LlmPanel llm={halogen()} sparkId="fixture" llmPort={8731} />);
     expect(container.textContent).toContain("Halogen · :8731 · v0.20.0");
     expect(container.textContent).toContain("Decode · completed");
-    expect(container.textContent).toContain("Prefill · last completed");
+    expect(container.textContent).toContain("Prefill · last 60s");
     expect(container.textContent).toContain("Computed tokens only");
     expect(container.textContent).toContain("NPU activity is not included");
     expect(container.textContent).not.toContain("includes cached tokens");
@@ -46,6 +46,19 @@ describe("Halogen monitoring", () => {
     act(() => root.render(<LlmPanel llm={halogen({ ...quiet, requestsRunning: null, requestsWaiting: null })} sparkId="fixture" llmPort={8731} />));
     expect(container.querySelector("[data-llm-idle]")).toBeNull();
     act(() => root.render(<LlmPanel llm={halogen({ ...quiet, slotsActive: 0, requestsRunning: 0, requestsWaiting: 0 })} sparkId="fixture" llmPort={8731} />));
+    expect(container.querySelector("[data-llm-idle]")?.textContent).toMatch(/^Idle/);
+  });
+
+  it("keeps recent prefill visible while idle and shows a gap when the window expires", () => {
+    const held = halogen({ generationTps: 0, slotsActive: 0, requestsRunning: 0, requestsWaiting: 0,
+      prefillMeasurementValid: true, prefillMeasuredAt: Date.now() - 20_000 });
+    const { container, root } = render(<LlmPanel llm={held} sparkId="fixture" llmPort={8731} />);
+    expect(container.textContent).toContain("Prefill · last 60s");
+    expect(container.textContent).toContain("1,000");
+    expect(container.querySelector("[data-llm-idle]")?.textContent).toMatch(/^Idle/);
+    act(() => root.render(<LlmPanel llm={{ ...held, prefillTps: 0, prefillTpsSource: null,
+      prefillMeasurementValid: false, prefillMeasuredAt: null }} sparkId="fixture" llmPort={8731} />));
+    expect([...container.querySelectorAll(".sp-big-lg")].map((e) => e.textContent)).toEqual(["—", "—"]);
     expect(container.querySelector("[data-llm-idle]")?.textContent).toMatch(/^Idle/);
   });
 
