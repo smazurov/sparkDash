@@ -10,6 +10,7 @@ import { backendLabel } from "../../shared/llmBackends";
 import { formatDiskSize, formatMb } from "../../shared/formatBytes";
 import { shortProcessName } from "../../shared/processName";
 import { shortGpuName } from "../../shared/gpuName";
+import { mainFilesystem, metricsView } from "../../shared/mainFilesystem";
 import { Tag } from "../ui/Tag";
 import { HealthChips, worstSeverity } from "../ui/HealthFindings";
 import { AppLink } from "../ui/AppLink";
@@ -22,6 +23,8 @@ import { ModelLauncher } from "./ModelLauncher";
 
 type Unit = "celsius" | "fahrenheit";
 type WakeMessage = "sent" | "failed" | { raw: string } | null;
+
+const MULTI_RANK_HOLDER = /(?:^|[\s/\\_-])(?:tensorfold|strata|vllm|sglang|mpirun|torchrun)(?:$|[\s._-])/i;
 
 function toF(c: number): number {
   return Math.round((c * 9) / 5 + 32);
@@ -111,6 +114,7 @@ function SparkCardImpl({
   spark,
   headSpark,
   vramContext = null,
+  siblingServing = false,
   temperatureUnit,
   onSelect,
 }: {
@@ -119,6 +123,8 @@ function SparkCardImpl({
   headSpark?: SparkSnapshot | null;
   /** Breakdown inputs (see `vramContextFor`); null keeps the plain VRAM bar. */
   vramContext?: VramBreakdownContext | null;
+  /** True when another non-worker Spark in the fleet is currently serving an LLM endpoint. */
+  siblingServing?: boolean;
   temperatureUnit: Unit;
   onSelect?: (id: string) => void;
 }) {
@@ -186,8 +192,8 @@ function SparkCardImpl({
   // unevenly across cards (or one card sitting idle).
   const cards = gpu?.gpus && gpu.gpus.length > 1 ? gpu.gpus : null;
 
-  const rootDisk =
-    spark.metrics.storage.find((d) => d.label === "/") ?? spark.metrics.storage.find((d) => d.device === "nvme0n1p2");
+  // The same "main disk" as the Storage Manager's card and summary (shared policy: "/" first, never /boot/efi).
+  const rootDisk = mainFilesystem(spark.metrics.storage, metricsView);
 
   const comfy = spark.comfyMonitoring ? spark.metrics?.comfy : undefined;
   const hermes = spark.hermes;
@@ -257,6 +263,8 @@ function SparkCardImpl({
     .filter((p) => p.vramMB > 0)
     .slice(0, 3)
     .map((p) => `${shortProcessName(p.name)} (${formatMb(p.vramMB)})`);
+  const hasMultiRankHolder = (gpu?.processes ?? []).some((p) => p.vramMB > 0 && MULTI_RANK_HOLDER.test(p.name));
+  const suggestWorkerRole = role === "standalone" && (siblingServing || hasMultiRankHolder);
   const loadingHint =
     !llm && (memUsed >= 2048 || usage >= 10)
       ? gpuHolders.length > 0
@@ -282,6 +290,18 @@ function SparkCardImpl({
     : null;
   const llmChipTitle =
     parallel != null && llm?.requestsRunning != null ? t("card.parallelRequests", { count: parallel }) : undefined;
+  // TensorFold's shared cache: how much of the pool is reserved and how much is kept, from the
+  // engine's own accounting. Absent for engines or builds that report no cache group.
+  const cache = llm?.cache?.pool ? llm.cache : null;
+  const cacheCapacity = cache?.pool?.capacityPositions ?? 0;
+  const cachePct = (n: number) => (cacheCapacity > 0 ? Math.round((n / cacheCapacity) * 100) : 0);
+  const cacheChip = cache
+    ? `${cachePct(cache.pool!.activeReservedPositions)}% active · ${cachePct(cache.pool!.retainedPrefixPositions)}% kept`
+    : null;
+  const cacheChipTitle = cache
+    ? `Shared pool ${cache.pool!.capacityPositions.toLocaleString()} positions, ${cache.contextLimitPositions?.toLocaleString() ?? "?"} per request, ${cache.streamCapacity ?? "?"} streams; ` +
+      `snapshot store ${cache.promptState?.enabled ? `${cache.promptState.heldBytes ?? 0} of ${cache.promptState.budgetBytes ?? 0} bytes` : "not reported"}`
+    : undefined;
 
   const chips = (
     <div className="ov-chips">
@@ -297,6 +317,7 @@ function SparkCardImpl({
         </Tag>
       ) : null}
       {online && llmChip ? <Tag tone={(llm?.requestsRunning ?? llm?.slotsActive ?? 0) > 0 ? "good" : "neutral"} title={llmChipTitle}>{llmChip}</Tag> : null}
+      {online && cacheChip ? <Tag title={cacheChipTitle}>{cacheChip}</Tag> : null}
       {comfy !== undefined || spark.comfyMonitoring ? (
         !comfy?.available ? (
           <Tag title={t("card.comfyUnavailable")}>Comfy</Tag>
@@ -439,7 +460,7 @@ function SparkCardImpl({
               ) : null}
             </div>
           </div>
-          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform, gpu?.memoryModel)].low} /> : null}
+          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} suggestWorkerRole={suggestWorkerRole} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform, gpu?.memoryModel)].low} /> : null}
           {role === "worker" ? (
             <div className="ov-launch ov-launch--worker">
               <div className="eyebrow">{t("card.workerOfLabel")}</div>

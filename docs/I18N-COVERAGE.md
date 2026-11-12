@@ -2,6 +2,18 @@
 
 **Snapshot baseline:** `main` at `7c2b9638b025cd39fb43f95c225de62980f130ee` on 2026-11-03. This is an inventory and update checklist, not a completion metric: passing tests or a successful build do not establish that a page is localized.
 
+## API Keys follow-up (2026-11-11)
+
+Review [#372](https://github.com/MiaAI-Lab/sparkDash/pull/372) is pending upstream. The November 11 maintainer feedback accepts the localization structure and asks for the obsolete Overview build workaround to be removed.
+
+The PR is rebased onto `163d109738d7c3cb8ae06b62f05840083a879a5f`. Upstream commit `b4e25da2` supplies the shared `mainFilesystem` module, so the rebased PR uses that implementation and removes its earlier SparkCard workaround and associated test additions. The localization can be reviewed independently of the #316–#325 sequence.
+
+This follow-up adds a standalone `apiKeys` namespace and translates the opt-in read-only page plus its Settings toggle. Headers, controls, finite status labels, retry/error wrappers, table/detail fields, empty/pending feedback and unknown/unlimited/all fallbacks switch immediately. English fallback and the formatter defaults remain stable. Aliases, hashed IDs, model names, bridge diagnostics, budget durations and wire state values remain raw; CSS status values and date/money formatting are unchanged. Locale changes retain the selected key and do not request data again. This does not enable the feature or configure a bridge.
+
+Validation of the rebased source is recorded in the PR before publication. Earlier November 7 acceptance covered the English/Chinese page, selected detail, unknown/zero values, empty/error feedback and raw markup-like aliases/models using explicit fixture data.
+
+The maintainer also confirmed the requested bounds documentation and text rendering in [#325](https://github.com/MiaAI-Lab/sparkDash/pull/325#issuecomment-6798095224). That review remains open in the stated sequence. The page slices #315–#324 have an upstream integration commit at `9ad3711`; their PR records have separate lifecycle status. Earlier dated inventory snapshots follow below.
+
 ## Unified progress index
 
 Keep one progress list while retaining separate, complete-feature pull requests. This inventory tracks all reviews; a pending row does not mean its source is included in every branch. Open status was checked on 2026-10-31; an open PR is implemented work awaiting review, not shipped coverage.

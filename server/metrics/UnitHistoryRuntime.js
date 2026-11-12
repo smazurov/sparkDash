@@ -79,8 +79,7 @@ export function createGpuHistoryHandler({ store, hasUnit, now = Date.now }) {
  * GET /api/sparks/:id/history?range=1h|6h|24h|7d|30d (default 1h) — the bucketed tiers.
  * 404 for an unknown unit, 400 for a bad range, `{ enabled: false }` while the setting is off.
  */
-export function createUnitHistoryHandler({ store, hasUnit, isEnabled, getSnapshot = () => null, now = Date.now }) {
-  return (req, res) => {
+export function createUnitHistoryHandler({ store, cacheStore = null, hasUnit, isEnabled, getSnapshot = () => null, now = Date.now }) {  return (req, res) => {
     const id = req.params?.id;
     if (!hasUnit(id)) return res.status(404).json({ error: "Spark not found" });
     const range = req.query?.range ?? "1h";
@@ -90,14 +89,21 @@ export function createUnitHistoryHandler({ store, hasUnit, isEnabled, getSnapsho
       });
     }
     if (!isEnabled()) return res.json({ enabled: false });
-    const data = store.query(id, range, now());
+    const atMs = now();
+    let cache = null;
+    try {
+      cache = cacheStore ? cacheStore.query(id, range, atMs) : null;
+    } catch {
+      // The gauge tiers must answer even if the cache sidecar cannot.
+      cache = null;
+    }
+    const data = store.query(id, range, atMs);
     const halogen = halogenPorts(getSnapshot(id));
     const llm = data.llm.map((entry) => ({ ...entry, points: entry.points.map(({ genTps, genTpsWall, ...point }) => {
       const decode = halogen.has(entry.port) ? genTpsWall : genTps;
       return decode ? { ...point, genTps: decode } : point;
     }) }));
-    return res.json({ enabled: true, ...data, llm });
-  };
+    return res.json({ enabled: true, ...data, llm, cache });  };
 }
 
 export function registerUnitHistoryRoutes(app, deps) {
@@ -112,6 +118,7 @@ export function registerUnitHistoryRoutes(app, deps) {
  */
 export function createUnitHistoryRuntime({
   store,
+  cacheStore = null,
   orderedSnapshots,
   monitors,
   isEnabled,
@@ -144,7 +151,20 @@ export function createUnitHistoryRuntime({
           /* sampling must never break the server */
         }
       }
+      // Cache history follows the same opt-in as the bucketed tiers: no sampling, no sidecar.
       if (!isEnabled()) return;
+      for (const snap of snapshots) {
+        try {
+          cacheStore?.record(snap, atMs);
+        } catch {
+          /* the cache sidecar must never break the server */
+        }
+      }
+      try {
+        cacheStore?.prune(new Set(snapshots.map((snap) => snap?.id)));
+      } catch {
+        /* pruning is best effort */
+      }
       store.recordSample(
         snapshots.map((snap) => ({
           id: snap?.id,
@@ -168,6 +188,7 @@ export function createUnitHistoryRuntime({
       sampleTimer = setIntervalFn(sample, HISTORY_SAMPLE_INTERVAL_MS);
       sampleTimer?.unref?.();
       store.start();
+      cacheStore?.start();
       return true;
     },
 
@@ -187,6 +208,11 @@ export function createUnitHistoryRuntime({
         store.stop();
       } catch (error) {
         reportError("[UnitHistory] shutdown flush error", error);
+      }
+      try {
+        cacheStore?.stop();
+      } catch (error) {
+        reportError("[CacheHistory] shutdown flush error", error);
       }
     },
   };

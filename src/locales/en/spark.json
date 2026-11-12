@@ -75,7 +75,15 @@
     "allocationErrors": "GPU memory allocation errors since boot",
     "unavailableReason": "unavailable: {{reason}}",
     "gpuClock": "GPU clock",
-    "unifiedMemoryInUse": "Unified memory in use"
+    "unifiedMemoryInUse": "Unified memory in use",
+    "card": "Card",
+    "fan": "Fan",
+    "pcieLink": "PCIe link",
+    "pcieLinkHelp": "PCIe link now (a card parks its link lower when idle) and the best it can do",
+    "pcieBest": "best {{link}}",
+    "throttleReasons": "Throttle reasons",
+    "throttleNone": "None",
+    "clockLocked": "Clock locked ≤ {{mhz}} MHz"
   },
   "gpuChart": {
     "combined": "Combined",
@@ -229,6 +237,11 @@
     "prefillCompleted": "Prefill · last completed",
     "prefillNotMeasuredHelp": "No current prefill measurement; zero is not evidence that no prompt is being processed.",
     "notMeasuredLive": "Not measured live",
+    "dashboardStream": "Dashboard streams",
+    "dashboardStreamHelp": "Measured from tokens received by sparkDash benchmarks or Showcase on this port. Excludes other clients’ traffic.",
+    "sampled": "sampled",
+    "sampledHelp": "Measured from a tiny streamed completion the dashboard itself sends every 15 s (Settings → Stream-sample engines without gauges). This is the engine's single-stream decode speed, not other clients' traffic.",
+    "sampleOffHelp": "This engine publishes no live counters. Turn on Settings → Stream-sample engines without gauges to have the dashboard measure decode tok/s itself.",
     "completedPrefillHelp": "Token and prefill-time deltas over requests that finished in the same window; not continuous live throughput.",
     "effectiveIncludesCached": "Effective rate · includes cached tokens",
     "completedDecodeRate": "{{rate}} tok/s · last completions"

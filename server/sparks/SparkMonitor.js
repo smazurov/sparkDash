@@ -118,8 +118,10 @@ const HEALTH_LABELS = {
 export class SparkMonitor {
   /**
    * @param {object} spark
-   * @param {{ onWolMac?: (sparkId: string, mac: string) => void, onHermesChange?: () => void, resolveHeadModelId?: ((headId: string) => string | null), pollIntervalMs?: number }} [options]
+   * @param {{ onWolMac?: (sparkId: string, mac: string) => void, onHermesChange?: () => void, resolveHeadModelId?: ((headId: string) => string | null), resolveHeadLlmProgressAt?: ((headId: string) => number | null), pollIntervalMs?: number, llmProbeOptions?: () => object }} [options]
    *   pollIntervalMs: Settings → Poll interval; drives the fast collector timers.
+   *   llmProbeOptions: per-probe options for every LlmProbe this monitor builds
+   *   (e.g. the opt-in stream-sample callbacks); evaluated at construction time.
    */
   constructor(spark, options = {}) {
     this.spark = spark;
@@ -147,13 +149,16 @@ export class SparkMonitor {
     // map; never writes back to registry config (derived display only).
     this._resolveHeadModelId =
       typeof options.resolveHeadModelId === "function" ? options.resolveHeadModelId : null;
+    this._resolveHeadLlmProgressAt =
+      typeof options.resolveHeadLlmProgressAt === "function" ? options.resolveHeadLlmProgressAt : null;
+    this._llmProbeOptions = typeof options.llmProbeOptions === "function" ? options.llmProbeOptions : null;
     this.collector = createCollector(spark);
 
     // One LlmProbe per port — none when LLM monitoring is off
     this.llmProbes = new Map();
     if (this._llmMonitoringEnabled(spark)) {
       for (const port of this._llmPorts()) {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(port, new LlmProbe(spark, port, this._llmProbeOptions ? this._llmProbeOptions() : undefined));
       }
     }
 
@@ -305,7 +310,7 @@ export class SparkMonitor {
         existing.spark = spark;
         this.llmProbes.set(port, existing);
       } else {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(port, new LlmProbe(spark, port, this._llmProbeOptions ? this._llmProbeOptions() : undefined));
       }
     }
     for (const [port, probe] of prevProbes) {
@@ -417,6 +422,24 @@ export class SparkMonitor {
       if (id) return id;
     }
     return null;
+  }
+
+  /** Last measured inference progress on this node, never a worker's inherited progress. */
+  llmProgressAt() {
+    if (!this.online || !this._llmMonitoringEnabled()) return null;
+    return this._healthEval.llmProgressAt;
+  }
+
+  /** A worker without local probes uses only its explicitly configured head. */
+  _headLlmProgressAt() {
+    const role = this.spark.role || (this.spark.workerNode ? "worker" : "standalone");
+    const headId = this.spark.workerHeadId;
+    if (role !== "worker" || this._llmMonitoringEnabled() || !headId || headId === this.spark.id) return null;
+    try {
+      return this._resolveHeadLlmProgressAt?.(headId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -805,6 +828,7 @@ export class SparkMonitor {
           network: this._metrics.network,
           roce: this._metrics.roce,
           llm: this._metrics.llm,
+          headLlmProgressAt: this._headLlmProgressAt(),
         runtimes: this._metrics.runtimes,
         unavailable: this._metrics.unavailable,
         agentOnline: this._metrics.agentOnline ?? null,
@@ -851,6 +875,8 @@ export class SparkMonitor {
    */
   _holdFindings(findings, now) {
     this._healthSeen ??= new Map();
+    // Measured progress disproves a stall; do not retain the old warning for 90 seconds.
+    if (this._healthEval.lowPowerProgressing) this._healthSeen.delete("low-power");
     for (const f of findings) this._healthSeen.set(f.id, { finding: f, at: now });
     const out = [...findings];
     const present = new Set(findings.map((f) => f.id));
@@ -1202,7 +1228,7 @@ export class SparkMonitor {
           {
             const probes = Array.from(this.llmProbes.values());
             this._metrics.llm = this._stampLlmLastActive(probes, result);
-            this._updateHealth();
+            this._updateHealth("llm");
             for (let i = 0; i < result.length; i++) {
               const probe = probes[i];
               if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
